@@ -1,0 +1,12 @@
+One tunnel for connector {{ .Values.connector.id }} is configured.
+
+Check: kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+Logs: kubectl -n {{ .Release.Namespace }} logs deployment/{{ include "connector.name" . }} -c connector
+Enrollment: kubectl -n {{ .Release.Namespace }} logs deployment/{{ include "connector.name" . }} -c enroll
+
+After enrollment, delete the one-time enrollment Secret. Restarts reuse the PVC.
+Do not scale this Deployment: each tunnel needs a separate release,
+enrollment token, and identity volume. No Service or Ingress is required.
+
+Uninstall ends the live session but does NOT revoke the tunnel or erase its identity.
+Revoke the tunnel in Guild before deleting its retained PVC.

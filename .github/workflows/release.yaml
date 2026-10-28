@@ -1,0 +1,100 @@
+name: Private connector release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version matching the connector package and chart (major.minor.patch)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: private-connector-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main' && vars.PRIVATE_CONNECTOR_RELEASE_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment: private-connector-release
+    permissions:
+      contents: read
+      packages: write
+    env:
+      CONNECTOR_VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: azure/setup-helm@v4.3.1
+        with:
+          version: v3.17.3
+      - run: python -m pip install --upgrade 'pip>=26.2.2' && pip install uv==0.13.4
+      - name: Validate version, tests and chart
+        run: |
+          uv sync --locked
+          uv run --frozen python scripts/check-release.py
+          uv run --frozen ruff check
+          uv run --frozen ruff format --check
+          uv run --frozen python -m unittest discover -s tests -v
+          uv run --frozen python -m unittest discover -s packaging_tests -v
+      - name: Validate Compose configuration
+        working-directory: deploy/compose
+        env:
+          CONNECTOR_IMAGE: private-connector:release-test
+        run: |
+          docker compose config --quiet
+      - name: Test the packaged runtime before publishing
+        run: |
+          docker build -t private-connector:release-test .
+          bash scripts/smoke-image.sh private-connector:release-test
+      - name: Set package names
+        id: names
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          echo "image=ghcr.io/${OWNER,,}/private-connector" >> "$GITHUB_OUTPUT"
+          echo "charts=oci://ghcr.io/${OWNER,,}/charts" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Require an unpublished image and chart version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_ACTOR: ${{ github.actor }}
+          IMAGE: ${{ steps.names.outputs.image }}
+          CHARTS: ${{ steps.names.outputs.charts }}
+        run: uv run --frozen python scripts/check_release_available.py
+      - name: Publish versioned multi-architecture image
+        id: image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.names.outputs.image }}:${{ inputs.version }}
+          build-args: |
+            VERSION=${{ inputs.version }}
+            REVISION=${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+      - name: Publish OCI Helm chart
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_ACTOR: ${{ github.actor }}
+          CHARTS: ${{ steps.names.outputs.charts }}
+          IMAGE: ${{ steps.names.outputs.image }}
+          DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          printf '%s' "$GH_TOKEN" | helm registry login ghcr.io --username "$GH_ACTOR" --password-stdin
+          helm package helm/private-connector --destination /tmp/connector-chart
+          helm push "/tmp/connector-chart/private-connector-${CONNECTOR_VERSION}.tgz" "$CHARTS"
+          printf 'Image: `%s@%s`\n\nChart: `%s/private-connector` version `%s`\n' "$IMAGE" "$DIGEST" "$CHARTS" "$CONNECTOR_VERSION" >> "$GITHUB_STEP_SUMMARY"

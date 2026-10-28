@@ -1,0 +1,9 @@
+{
+  "control_plane_url": "https://api.example.com",
+  "connector_id": "00000000-0000-0000-0000-000000000001",
+  "identity_directory": "/var/lib/guild-connector/identity",
+  "max_in_flight": 4,
+  "destinations": {
+    "foo": "https://foo.internal:8443"
+  }
+}

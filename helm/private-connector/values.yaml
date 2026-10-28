@@ -1,0 +1,46 @@
+image:
+  repository: ghcr.io/guildaidev/private-connector
+  # Empty tag uses Chart.appVersion. Digest takes precedence.
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+connector:
+  id: ""
+  controlPlaneUrl: ""
+  destinations: {}
+  maxInFlight: 4
+
+# An existing Secret, never a token value in Helm values/release history.
+# Optional mount: once enrolled, the Secret can be deleted.
+enrollment:
+  existingSecret: ""
+  key: token
+
+persistence:
+  existingClaim: ""
+  size: 1Gi
+  # null uses the cluster default; "" explicitly disables dynamic provisioning.
+  storageClass: null
+
+# Optional PEM bundle for a private control-plane CA, not an identity/key.
+controlPlaneCA:
+  existingConfigMap: ""
+  key: ca.pem
+
+# Optional PEM bundle for a private tunnel-gateway CA, not an identity/key.
+gatewayCA:
+  existingConfigMap: ""
+  key: ca.pem
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+nodeSelector: {}
+tolerations: []
+affinity: {}

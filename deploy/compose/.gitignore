@@ -1,0 +1,4 @@
+connector.json
+.env
+*token*
+enrollment/

@@ -1,0 +1,159 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "connector.name" . }}
+  labels:
+    {{- include "connector.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "connector.labels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "connector.labels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 40
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        - name: enroll
+          image: {{ include "connector.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: [enroll, --if-needed, --config, /etc/guild/connector.json, --enrollment-token-file, /run/enrollment/token]
+          securityContext: &security
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: enrollment
+              mountPath: /run/enrollment
+              readOnly: true
+            - name: config
+              mountPath: /etc/guild
+              readOnly: true
+            - name: identity
+              mountPath: /var/lib/guild-connector
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.controlPlaneCA.existingConfigMap }}
+            - name: control-plane-ca
+              mountPath: /etc/guild/ca
+              readOnly: true
+            {{- end }}
+      containers:
+        - name: connector
+          image: {{ include "connector.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext: *security
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          startupProbe:
+            exec:
+              command: [guild-private-connector-health]
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            exec:
+              command: [guild-private-connector-health]
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: [guild-private-connector-health, --ready]
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 2
+          volumeMounts:
+            {{- if .Values.gatewayCA.existingConfigMap }}
+            - name: gateway-ca
+              mountPath: /etc/guild/gateway-ca
+              readOnly: true
+            {{- end }}
+            - name: config
+              mountPath: /etc/guild
+              readOnly: true
+            - name: identity
+              mountPath: /var/lib/guild-connector
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.controlPlaneCA.existingConfigMap }}
+            - name: control-plane-ca
+              mountPath: /etc/guild/ca
+              readOnly: true
+            {{- end }}
+      volumes:
+        {{- if .Values.gatewayCA.existingConfigMap }}
+        - name: gateway-ca
+          configMap:
+            name: {{ .Values.gatewayCA.existingConfigMap }}
+            items:
+              - key: {{ .Values.gatewayCA.key }}
+                path: ca.pem
+        {{- end }}
+        - name: config
+          configMap:
+            name: {{ include "connector.name" . }}
+        - name: enrollment
+          {{- if .Values.enrollment.existingSecret }}
+          secret:
+            secretName: {{ .Values.enrollment.existingSecret }}
+            optional: true
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.enrollment.key }}
+                path: token
+          {{- else }}
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+          {{- end }}
+        - name: identity
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-identity" (include "connector.name" .)) .Values.persistence.existingClaim }}
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+        {{- if .Values.controlPlaneCA.existingConfigMap }}
+        - name: control-plane-ca
+          configMap:
+            name: {{ .Values.controlPlaneCA.existingConfigMap }}
+            items:
+              - key: {{ .Values.controlPlaneCA.key }}
+                path: ca.pem
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

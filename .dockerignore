@@ -1,0 +1,6 @@
+**
+!Dockerfile
+!pyproject.toml
+!uv.lock
+!guild_connector/
+!guild_connector/*.py

@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["connector", "image", "enrollment", "persistence"],
+  "properties": {
+    "image": {
+      "type": "object", "additionalProperties": false,
+      "required": ["repository", "pullPolicy"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "tag": {"type": "string"},
+        "digest": {"type": "string", "pattern": "^(sha256:[a-f0-9]{64})?$"},
+        "pullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]}
+      }
+    },
+    "imagePullSecrets": {"type": "array", "items": {"type": "object"}},
+    "connector": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "controlPlaneUrl", "destinations", "maxInFlight"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-fA-F0-9]{8}(-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}$"},
+        "controlPlaneUrl": {"type": "string", "pattern": "^https://[^/?#@]+(/[^?#]*)?$"},
+        "destinations": {
+          "type": "object", "minProperties": 1,
+          "propertyNames": {"minLength": 1},
+          "additionalProperties": {"type": "string", "pattern": "^https?://[^/?#@]+/?$"}
+        },
+        "maxInFlight": {"type": "integer", "minimum": 1}
+      }
+    },
+    "enrollment": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "existingSecret": {"type": "string"},
+        "key": {"type": "string", "minLength": 1}
+      }
+    },
+    "persistence": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "existingClaim": {"type": "string"},
+        "size": {"type": "string", "minLength": 1},
+        "storageClass": {"type": ["string", "null"]}
+      }
+    },
+    "controlPlaneCA": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "existingConfigMap": {"type": "string"},
+        "key": {"type": "string", "minLength": 1}
+      }
+    },
+    "gatewayCA": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "existingConfigMap": {"type": "string"},
+        "key": {"type": "string", "minLength": 1}
+      }
+    },
+    "resources": {"type": "object"},
+    "nodeSelector": {"type": "object"},
+    "tolerations": {"type": "array"},
+    "affinity": {"type": "object"}
+  }
+}

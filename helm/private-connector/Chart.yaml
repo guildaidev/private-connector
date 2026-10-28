@@ -1,0 +1,7 @@
+apiVersion: v2
+name: private-connector
+description: One customer-side Guild connector tunnel with persistent identity
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.25.0-0"

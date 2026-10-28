@@ -1,0 +1,43 @@
+services:
+  connector:
+    image: ${CONNECTOR_IMAGE:?Set CONNECTOR_IMAGE to the released image digest}
+    restart: unless-stopped
+    command: [run, --config, /etc/guild/connector.json, --enrollment-token-file, /run/enrollment/token, --health-file, /tmp/connector-health.json]
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 512m
+    cpus: 1.0
+    stop_grace_period: 40s
+    healthcheck:
+      test: [CMD, guild-private-connector-health]
+      interval: 15s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m,mode=1777
+    volumes:
+      - type: bind
+        source: ./connector.json
+        target: /etc/guild/connector.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - identity:/var/lib/guild-connector
+      - type: bind
+        source: ./enrollment
+        target: /run/enrollment
+        read_only: true
+        bind:
+          create_host_path: false
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  identity:
