@@ -12,7 +12,7 @@ from scripts.check_release_available import main
 IMAGE = "guildaidev/private-connector"
 CHART = "guildaidev/charts/private-connector"
 ENV = {
-    "CONNECTOR_VERSION": "0.1.0",
+    "CONNECTOR_VERSION": "0.2.0",
     "IMAGE": f"ghcr.io/{IMAGE}",
     "CHARTS": "oci://ghcr.io/guildaidev/charts",
     "GH_ACTOR": "release-bot",
@@ -63,7 +63,7 @@ class ReleaseAvailabilityTests(unittest.TestCase):
                         return response
                     checked.append(request.url.path)
                     if request.url.path in [
-                        f"/v2/{repo}/manifests/0.1.0" for repo in existing
+                        f"/v2/{repo}/manifests/0.2.0" for repo in existing
                     ]:
                         return httpx.Response(200, json={"schemaVersion": 2})
                     code = (
@@ -76,16 +76,16 @@ class ReleaseAvailabilityTests(unittest.TestCase):
                 status, output = self.run_check(respond)
                 self.assertEqual(status, 1 if existing else 0, output)
                 self.assertEqual(
-                    checked, [f"/v2/{repo}/manifests/0.1.0" for repo in (IMAGE, CHART)]
+                    checked, [f"/v2/{repo}/manifests/0.2.0" for repo in (IMAGE, CHART)]
                 )
                 for repo in existing:
-                    self.assertIn(f"ghcr.io/{repo}:0.1.0", output)
+                    self.assertIn(f"ghcr.io/{repo}:0.2.0", output)
 
     def test_authentication_registry_and_redirect_errors_fail_closed(self):
         for phase in (
             "/token",
-            f"/v2/{IMAGE}/manifests/0.1.0",
-            f"/v2/{CHART}/manifests/0.1.0",
+            f"/v2/{IMAGE}/manifests/0.2.0",
+            f"/v2/{CHART}/manifests/0.2.0",
         ):
             for status_code in (302, 401, 403, 429, 500, 503):
                 with self.subTest(phase=phase, status=status_code):
@@ -141,8 +141,8 @@ class ReleaseAvailabilityTests(unittest.TestCase):
     def test_network_failures_abort_instead_of_counting_as_missing(self):
         for phase in (
             "/token",
-            f"/v2/{IMAGE}/manifests/0.1.0",
-            f"/v2/{CHART}/manifests/0.1.0",
+            f"/v2/{IMAGE}/manifests/0.2.0",
+            f"/v2/{CHART}/manifests/0.2.0",
         ):
             for error in (httpx.ConnectError, httpx.ReadTimeout):
                 with self.subTest(phase=phase, error=error):
