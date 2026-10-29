@@ -38,6 +38,7 @@ class TunnelClient:
         max_in_flight: int = 16,
         rotated: asyncio.Event | None = None,
         refresh_requested: asyncio.Event | None = None,
+        target_names: tuple[str, ...] = (),
     ):
         parsed = urlsplit(base_url)
         if (
@@ -68,6 +69,7 @@ class TunnelClient:
         self._refresh_requested = refresh_requested
         self._credential = credential
         self._max_in_flight = max_in_flight
+        self._target_names = target_names
         self.connected = False
 
     async def run(
@@ -183,7 +185,7 @@ class TunnelClient:
             json.dumps(
                 {
                     "type": "hello",
-                    "protocol_version": 4,
+                    "protocol_version": 5,
                     "max_in_flight": self._max_in_flight,
                 }
             )
@@ -191,7 +193,7 @@ class TunnelClient:
         ready = _parse_frame(await asyncio.wait_for(socket.recv(), timeout=10))
         if (
             ready.get("type") != "ready"
-            or ready.get("protocol_version") != 4
+            or ready.get("protocol_version") != 5
             or type(ready.get("max_in_flight")) is not int
             or not 1 <= ready["max_in_flight"] <= self._max_in_flight
         ):
@@ -254,6 +256,32 @@ class TunnelClient:
                     if not isinstance(nonce, str) or len(nonce) > 128:
                         raise ProtocolError("Invalid heartbeat")
                     await socket.send(json.dumps({"type": "pong", "nonce": nonce}))
+                elif kind == "list_targets":
+                    if set(frame) != {"type", "id"}:
+                        raise ProtocolError("Invalid target list request")
+                    try:
+                        request_id = str(UUID(str(frame.get("id"))))
+                    except ValueError as error:
+                        raise ProtocolError("Invalid target list request ID") from error
+                    response = json.dumps(
+                        {
+                            "type": "targets",
+                            "id": request_id,
+                            "names": self._target_names,
+                        }
+                    )
+                    if (
+                        len(self._target_names) > 2048
+                        or len(response.encode()) > 4 * 1024 * 1024
+                    ):
+                        response = json.dumps(
+                            {
+                                "type": "error",
+                                "id": request_id,
+                                "error_code": "targets_unavailable",
+                            }
+                        )
+                    await socket.send(response)
                 elif kind == "cancel":
                     try:
                         request_id = str(UUID(str(frame.get("id"))))

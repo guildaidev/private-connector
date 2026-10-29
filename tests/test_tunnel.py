@@ -128,6 +128,7 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                 credential=credential or self.credential,
                 max_in_flight=max_in_flight,
                 rotated=rotated,
+                target_names=("local",),
             ),
             destinations={
                 "local": Destination(
@@ -138,6 +139,77 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
 
     def credential(self):
         return "test-credential", datetime.now(UTC) + timedelta(minutes=5)
+
+    async def test_live_target_listing_uses_configured_names(self):
+        stop = asyncio.Event()
+        reported = asyncio.get_running_loop().create_future()
+        request_id = str(uuid4())
+
+        async def handler(socket):
+            await socket.recv()
+            await socket.send(
+                json.dumps({"type": "ready", "protocol_version": 5, "max_in_flight": 2})
+            )
+            await socket.send(json.dumps({"type": "list_targets", "id": request_id}))
+            reported.set_result(json.loads(await socket.recv()))
+            await stop.wait()
+
+        async with serve(handler, "127.0.0.1", 0, ssl=self.tls) as server:
+            task = asyncio.create_task(
+                self.connector(server.sockets[0].getsockname()[1]).run_forever(stop)
+            )
+            try:
+                assert await asyncio.wait_for(reported, 3) == {
+                    "type": "targets",
+                    "id": request_id,
+                    "names": ["local"],
+                }
+                self.assertEqual(self.requests, [])
+            finally:
+                stop.set()
+                await asyncio.wait_for(task, 3)
+
+    async def test_large_target_list_does_not_disconnect_tunnel(self):
+        stop = asyncio.Event()
+        reported = asyncio.get_running_loop().create_future()
+        request_id = str(uuid4())
+
+        async def handler(socket):
+            await socket.recv()
+            await socket.send(
+                json.dumps({"type": "ready", "protocol_version": 5, "max_in_flight": 2})
+            )
+            await socket.send(json.dumps({"type": "list_targets", "id": request_id}))
+            response = json.loads(await socket.recv())
+            await socket.send(json.dumps({"type": "ping", "nonce": "still-open"}))
+            heartbeat = json.loads(await socket.recv())
+            reported.set_result((response, heartbeat))
+            await stop.wait()
+
+        async with serve(handler, "127.0.0.1", 0, ssl=self.tls) as server:
+            port = server.sockets[0].getsockname()[1]
+            connector = PrivateConnector(
+                tunnel=TunnelClient(
+                    base_url=f"https://127.0.0.1:{port}",
+                    ca_file=str(self.cert),
+                    credential=self.credential,
+                    target_names=tuple(str(i) for i in range(2049)),
+                ),
+                destinations={},
+            )
+            task = asyncio.create_task(connector.run_forever(stop))
+            try:
+                assert await asyncio.wait_for(reported, 3) == (
+                    {
+                        "type": "error",
+                        "id": request_id,
+                        "error_code": "targets_unavailable",
+                    },
+                    {"type": "pong", "nonce": "still-open"},
+                )
+            finally:
+                stop.set()
+                await asyncio.wait_for(task, 3)
 
     async def test_gateway_base_url_preserves_optional_path_and_query(self):
         for scheme in ("https", "wss"):
@@ -161,7 +233,7 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                                 json.dumps(
                                     {
                                         "type": "ready",
-                                        "protocol_version": 4,
+                                        "protocol_version": 5,
                                         "max_in_flight": 1,
                                     }
                                 )
@@ -242,7 +314,7 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
             hello = json.loads(await socket.recv())
             self.assertEqual(hello["max_in_flight"], 128)
             await socket.send(
-                json.dumps({"type": "ready", "protocol_version": 4, "max_in_flight": 1})
+                json.dumps({"type": "ready", "protocol_version": 5, "max_in_flight": 1})
             )
             await socket.send(json.dumps(slow))
             self.assertEqual(json.loads(await socket.recv())["type"], "ack")
@@ -293,7 +365,7 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                 await socket.recv()
                 await socket.send(
                     json.dumps(
-                        {"type": "ready", "protocol_version": 4, "max_in_flight": 2}
+                        {"type": "ready", "protocol_version": 5, "max_in_flight": 2}
                     )
                 )
                 await socket.send(json.dumps(request))
@@ -359,11 +431,11 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                 )
                 hello = json.loads(await socket.recv())
                 self.assertEqual(
-                    hello, {"type": "hello", "protocol_version": 4, "max_in_flight": 2}
+                    hello, {"type": "hello", "protocol_version": 5, "max_in_flight": 2}
                 )
                 await socket.send(
                     json.dumps(
-                        {"type": "ready", "protocol_version": 4, "max_in_flight": 2}
+                        {"type": "ready", "protocol_version": 5, "max_in_flight": 2}
                     )
                 )
                 await socket.send(json.dumps(slow))
@@ -416,7 +488,7 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                 await socket.recv()
                 await socket.send(
                     json.dumps(
-                        {"type": "ready", "protocol_version": 4, "max_in_flight": 2}
+                        {"type": "ready", "protocol_version": 5, "max_in_flight": 2}
                     )
                 )
                 await socket.send(json.dumps(request))
@@ -475,7 +547,7 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
             connections += 1
             await socket.recv()
             await socket.send(
-                json.dumps({"type": "ready", "protocol_version": 4, "max_in_flight": 2})
+                json.dumps({"type": "ready", "protocol_version": 5, "max_in_flight": 2})
             )
             await socket.wait_closed()
             if not closed.done():
@@ -501,7 +573,7 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
         async def handler(socket):
             await socket.recv()
             await socket.send(
-                json.dumps({"type": "ready", "protocol_version": 4, "max_in_flight": 2})
+                json.dumps({"type": "ready", "protocol_version": 5, "max_in_flight": 2})
             )
             await socket.send(
                 json.dumps(
@@ -529,7 +601,7 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                 await socket.recv()
                 await socket.send(
                     json.dumps(
-                        {"type": "ready", "protocol_version": 4, "max_in_flight": 1}
+                        {"type": "ready", "protocol_version": 5, "max_in_flight": 1}
                     )
                 )
                 await socket.send(json.dumps(slow))
@@ -579,7 +651,7 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                 await socket.recv()
                 await socket.send(
                     json.dumps(
-                        {"type": "ready", "protocol_version": 4, "max_in_flight": 2}
+                        {"type": "ready", "protocol_version": 5, "max_in_flight": 2}
                     )
                 )
                 await socket.send(json.dumps(slow))
@@ -655,7 +727,7 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                 await socket.recv()
                 await socket.send(
                     json.dumps(
-                        {"type": "ready", "protocol_version": 4, "max_in_flight": 2}
+                        {"type": "ready", "protocol_version": 5, "max_in_flight": 2}
                     )
                 )
                 if number == 1:
@@ -807,7 +879,7 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                     json.dumps(
                         {
                             "type": "ready",
-                            "protocol_version": 4,
+                            "protocol_version": 5,
                             "max_in_flight": 2,
                         }
                     )
