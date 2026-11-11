@@ -265,8 +265,6 @@ class TunnelClient:
                         raise ProtocolError(
                             "Unexpected Guild tunnel gateway frame type"
                         )
-                    if set(frame) != {"type", "id"}:
-                        raise ProtocolError("Invalid target list request")
                     try:
                         request_id = str(UUID(str(frame.get("id"))))
                     except ValueError as error:

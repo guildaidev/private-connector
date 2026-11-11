@@ -250,8 +250,15 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
             await socket.send(
                 json.dumps({"type": "ready", "protocol_version": 5, "max_in_flight": 2})
             )
-            await socket.send(json.dumps({"type": "list_targets", "id": request_id}))
-            reported.set_result(json.loads(await socket.recv()))
+            await socket.send(
+                json.dumps(
+                    {"type": "list_targets", "id": request_id, "future_option": True}
+                )
+            )
+            response = json.loads(await socket.recv())
+            await socket.send(json.dumps({"type": "ping", "nonce": "still-open"}))
+            heartbeat = json.loads(await socket.recv())
+            reported.set_result((response, heartbeat))
             await stop.wait()
 
         async with serve(
@@ -261,15 +268,50 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                 self.connector(server.sockets[0].getsockname()[1]).run_forever(stop)
             )
             try:
-                assert await asyncio.wait_for(reported, 3) == {
-                    "type": "targets",
-                    "id": request_id,
-                    "names": ["local"],
-                }
+                assert await asyncio.wait_for(reported, 3) == (
+                    {"type": "targets", "id": request_id, "names": ["local"]},
+                    {"type": "pong", "nonce": "still-open"},
+                )
                 self.assertEqual(self.requests, [])
             finally:
                 stop.set()
                 await asyncio.wait_for(task, 3)
+
+    async def test_target_listing_rejects_invalid_ids(self):
+        for request in (
+            {"type": "list_targets"},
+            {"type": "list_targets", "id": "not-a-uuid", "future_option": True},
+            {"type": "list_targets", "id": None},
+        ):
+            with self.subTest(request=request):
+                stop = asyncio.Event()
+
+                async def handler(socket):
+                    await socket.recv()
+                    await socket.send(
+                        json.dumps(
+                            {"type": "ready", "protocol_version": 5, "max_in_flight": 2}
+                        )
+                    )
+                    await socket.send(json.dumps(request))
+                    await socket.wait_closed()
+
+                async with serve(
+                    handler,
+                    "127.0.0.1",
+                    0,
+                    ssl=self.tls,
+                    subprotocols=["guild-tunnel-v5"],
+                ) as server:
+                    with self.assertRaisesRegex(
+                        ProtocolError, "Invalid target list request ID"
+                    ):
+                        await asyncio.wait_for(
+                            self.connector(
+                                server.sockets[0].getsockname()[1]
+                            ).run_forever(stop),
+                            3,
+                        )
 
     async def test_large_target_list_does_not_disconnect_tunnel(self):
         stop = asyncio.Event()
