@@ -20,6 +20,7 @@ from .models import Delivery, ProtocolError, ProxyResponse
 from .protocol import MAX_FRAME_BYTES, STREAM_WINDOW, encode_response
 
 log = logging.getLogger(__name__)
+DISCOVERY_SUBPROTOCOL = "guild-tunnel-v5"
 
 
 class GatewayConnection(connect):
@@ -97,6 +98,7 @@ class TunnelClient:
                     self._url,
                     ssl=self._ssl_context,
                     additional_headers={"Authorization": f"Bearer {token}"},
+                    subprotocols=[DISCOVERY_SUBPROTOCOL],
                     proxy=None,
                     compression=None,
                     open_timeout=10,
@@ -181,11 +183,12 @@ class TunnelClient:
         expires_at: datetime,
         stream_forward: Callable[[Delivery], AsyncIterator[dict[str, object]]] | None,
     ) -> None:
+        version = 5 if socket.subprotocol == DISCOVERY_SUBPROTOCOL else 4
         await socket.send(
             json.dumps(
                 {
                     "type": "hello",
-                    "protocol_version": 5,
+                    "protocol_version": version,
                     "max_in_flight": self._max_in_flight,
                 }
             )
@@ -193,7 +196,8 @@ class TunnelClient:
         ready = _parse_frame(await asyncio.wait_for(socket.recv(), timeout=10))
         if (
             ready.get("type") != "ready"
-            or ready.get("protocol_version") != 5
+            or type(ready.get("protocol_version")) is not int
+            or ready.get("protocol_version") != version
             or type(ready.get("max_in_flight")) is not int
             or not 1 <= ready["max_in_flight"] <= self._max_in_flight
         ):
@@ -257,6 +261,10 @@ class TunnelClient:
                         raise ProtocolError("Invalid heartbeat")
                     await socket.send(json.dumps({"type": "pong", "nonce": nonce}))
                 elif kind == "list_targets":
+                    if version < 5:
+                        raise ProtocolError(
+                            "Unexpected Guild tunnel gateway frame type"
+                        )
                     if set(frame) != {"type", "id"}:
                         raise ProtocolError("Invalid target list request")
                     try:

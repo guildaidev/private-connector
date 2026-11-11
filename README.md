@@ -79,6 +79,8 @@ uv run guild-private-connector run --config connector.json \
 - Streaming calls require tunnel protocol 4.
 - Target discovery uses tunnel protocol 5. Guild requests target names over the
   existing connection. The connector never sends destination URLs in this reply.
+  The connector negotiates protocol 5 with a compatible gateway. With a protocol-4
+  gateway, forwarding and streaming continue, but target discovery is unavailable.
 
 ## Architecture and tests
 
