@@ -20,6 +20,7 @@ from .models import Delivery, ProtocolError, ProxyResponse
 from .protocol import MAX_FRAME_BYTES, STREAM_WINDOW, encode_response
 
 log = logging.getLogger(__name__)
+DISCOVERY_SUBPROTOCOL = "guild-tunnel-v5"
 
 
 class GatewayConnection(connect):
@@ -38,6 +39,7 @@ class TunnelClient:
         max_in_flight: int = 16,
         rotated: asyncio.Event | None = None,
         refresh_requested: asyncio.Event | None = None,
+        target_names: tuple[str, ...] = (),
     ):
         parsed = urlsplit(base_url)
         if (
@@ -68,6 +70,7 @@ class TunnelClient:
         self._refresh_requested = refresh_requested
         self._credential = credential
         self._max_in_flight = max_in_flight
+        self._target_names = target_names
         self.connected = False
 
     async def run(
@@ -95,6 +98,7 @@ class TunnelClient:
                     self._url,
                     ssl=self._ssl_context,
                     additional_headers={"Authorization": f"Bearer {token}"},
+                    subprotocols=[DISCOVERY_SUBPROTOCOL],
                     proxy=None,
                     compression=None,
                     open_timeout=10,
@@ -179,11 +183,12 @@ class TunnelClient:
         expires_at: datetime,
         stream_forward: Callable[[Delivery], AsyncIterator[dict[str, object]]] | None,
     ) -> None:
+        version = 5 if socket.subprotocol == DISCOVERY_SUBPROTOCOL else 4
         await socket.send(
             json.dumps(
                 {
                     "type": "hello",
-                    "protocol_version": 4,
+                    "protocol_version": version,
                     "max_in_flight": self._max_in_flight,
                 }
             )
@@ -191,7 +196,8 @@ class TunnelClient:
         ready = _parse_frame(await asyncio.wait_for(socket.recv(), timeout=10))
         if (
             ready.get("type") != "ready"
-            or ready.get("protocol_version") != 4
+            or type(ready.get("protocol_version")) is not int
+            or ready.get("protocol_version") != version
             or type(ready.get("max_in_flight")) is not int
             or not 1 <= ready["max_in_flight"] <= self._max_in_flight
         ):
@@ -254,6 +260,42 @@ class TunnelClient:
                     if not isinstance(nonce, str) or len(nonce) > 128:
                         raise ProtocolError("Invalid heartbeat")
                     await socket.send(json.dumps({"type": "pong", "nonce": nonce}))
+                elif kind == "list_targets":
+                    if expires_at <= datetime.now(UTC):
+                        raise TimeoutError("Tunnel authorization expired")
+                    if version < 5:
+                        raise ProtocolError(
+                            "Unexpected Guild tunnel gateway frame type"
+                        )
+                    try:
+                        request_id = str(UUID(str(frame.get("id"))))
+                    except ValueError as error:
+                        raise ProtocolError("Invalid target list request ID") from error
+                    response = json.dumps(
+                        {
+                            "type": "targets",
+                            "id": request_id,
+                            "names": self._target_names,
+                        }
+                    )
+                    target_count = len(self._target_names)
+                    encoded_size = len(response.encode())
+                    if target_count > 2048 or encoded_size > 4 * 1024 * 1024:
+                        log.warning(
+                            "Target discovery unavailable: %d targets, "
+                            "encoded response %d bytes (limits: 2048 targets, "
+                            "4194304 bytes)",
+                            target_count,
+                            encoded_size,
+                        )
+                        response = json.dumps(
+                            {
+                                "type": "error",
+                                "id": request_id,
+                                "error_code": "targets_unavailable",
+                            }
+                        )
+                    await socket.send(response)
                 elif kind == "cancel":
                     try:
                         request_id = str(UUID(str(frame.get("id"))))

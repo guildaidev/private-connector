@@ -12,9 +12,11 @@ from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 from uuid import uuid4
 
 from websockets.asyncio.server import serve
+from websockets.exceptions import ConnectionClosed
 
 from guild_connector.connector import PrivateConnector
 from guild_connector.models import Destination, ProtocolError
@@ -128,6 +130,7 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                 credential=credential or self.credential,
                 max_in_flight=max_in_flight,
                 rotated=rotated,
+                target_names=("local",),
             ),
             destinations={
                 "local": Destination(
@@ -138,6 +141,363 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
 
     def credential(self):
         return "test-credential", datetime.now(UTC) + timedelta(minutes=5)
+
+    async def test_gateway_upgrade_and_rollback_preserve_forwarding_and_streaming(self):
+        stop = asyncio.Event()
+        completed = asyncio.get_running_loop().create_future()
+        versions = []
+
+        def select_protocol(_connection, offered):
+            return "guild-tunnel-v5" if len(versions) == 1 else None
+
+        async def handler(socket):
+            try:
+                version = 5 if socket.subprotocol else 4
+                hello = json.loads(await socket.recv())
+                self.assertEqual(hello["protocol_version"], version)
+                self.assertEqual(
+                    socket.request.headers["Authorization"], "Bearer test-credential"
+                )
+                versions.append(version)
+                await socket.send(
+                    json.dumps(
+                        {
+                            "type": "ready",
+                            "protocol_version": version,
+                            "max_in_flight": 2,
+                        }
+                    )
+                )
+                if version == 5:
+                    request_id = str(uuid4())
+                    await socket.send(
+                        json.dumps({"type": "list_targets", "id": request_id})
+                    )
+                    self.assertEqual(
+                        json.loads(await socket.recv())["names"], ["local"]
+                    )
+                buffered = self.request("/buffered")
+                await socket.send(json.dumps(buffered))
+                self.assertEqual(json.loads(await socket.recv())["type"], "ack")
+                response = json.loads(await socket.recv())
+                self.assertEqual(response["type"], "response")
+                self.assertEqual(
+                    b64decode(response["response_body_base64"]), b"/buffered"
+                )
+                request = self.request("/fast")
+                request["stream_response"] = True
+                await socket.send(json.dumps(request))
+                frames = []
+                while not frames or frames[-1]["type"] != "response_end":
+                    frames.append(json.loads(await asyncio.wait_for(socket.recv(), 3)))
+                self.assertEqual(
+                    [frame["type"] for frame in frames],
+                    ["ack", "response_start", "response_chunk", "response_end"],
+                )
+                self.assertEqual(b64decode(frames[2]["response_body_base64"]), b"/fast")
+                if len(versions) == 3:
+                    completed.set_result(None)
+                    await stop.wait()
+            except Exception as error:
+                if not completed.done():
+                    completed.set_exception(error)
+
+        async with serve(
+            handler,
+            "127.0.0.1",
+            0,
+            ssl=self.tls,
+            subprotocols=["guild-tunnel-v5"],
+            select_subprotocol=select_protocol,
+        ) as server:
+            task = asyncio.create_task(
+                self.connector(server.sockets[0].getsockname()[1]).run_forever(stop)
+            )
+            try:
+                await asyncio.wait_for(completed, 12)
+                self.assertEqual(versions, [4, 5, 4])
+            finally:
+                stop.set()
+                await asyncio.wait_for(task, 3)
+
+    async def test_protocol_rejection_does_not_trigger_downgrade(self):
+        stop = asyncio.Event()
+        versions = []
+
+        async def handler(socket):
+            versions.append(json.loads(await socket.recv())["protocol_version"])
+            await socket.close(code=1008, reason="protocol rejected")
+
+        async with serve(
+            handler, "127.0.0.1", 0, ssl=self.tls, subprotocols=["guild-tunnel-v5"]
+        ) as server:
+            with self.assertRaisesRegex(
+                ProtocolError, "rejected the connector protocol"
+            ):
+                await asyncio.wait_for(
+                    self.connector(server.sockets[0].getsockname()[1]).run_forever(
+                        stop
+                    ),
+                    3,
+                )
+        self.assertEqual(versions, [5])
+
+    async def test_live_target_listing_uses_configured_names(self):
+        stop = asyncio.Event()
+        reported = asyncio.get_running_loop().create_future()
+        request_id = str(uuid4())
+
+        async def handler(socket):
+            await socket.recv()
+            await socket.send(
+                json.dumps({"type": "ready", "protocol_version": 5, "max_in_flight": 2})
+            )
+            await socket.send(
+                json.dumps(
+                    {"type": "list_targets", "id": request_id, "future_option": True}
+                )
+            )
+            response = json.loads(await socket.recv())
+            await socket.send(json.dumps({"type": "ping", "nonce": "still-open"}))
+            heartbeat = json.loads(await socket.recv())
+            reported.set_result((response, heartbeat))
+            await stop.wait()
+
+        async with serve(
+            handler, "127.0.0.1", 0, ssl=self.tls, subprotocols=["guild-tunnel-v5"]
+        ) as server:
+            task = asyncio.create_task(
+                self.connector(server.sockets[0].getsockname()[1]).run_forever(stop)
+            )
+            try:
+                assert await asyncio.wait_for(reported, 3) == (
+                    {"type": "targets", "id": request_id, "names": ["local"]},
+                    {"type": "pong", "nonce": "still-open"},
+                )
+                self.assertEqual(self.requests, [])
+            finally:
+                stop.set()
+                await asyncio.wait_for(task, 3)
+
+    async def test_target_listing_after_expiry_closes_without_names(self):
+        stop = asyncio.Event()
+        finished = asyncio.get_running_loop().create_future()
+        initial = datetime.now(UTC)
+        expiry = initial + timedelta(minutes=1)
+
+        class Clock(datetime):
+            current = initial
+
+            @classmethod
+            def now(cls, tz=None):
+                return cls.current
+
+        async def handler(socket):
+            try:
+                await socket.recv()
+                await socket.send(
+                    json.dumps(
+                        {"type": "ready", "protocol_version": 5, "max_in_flight": 2}
+                    )
+                )
+                await socket.send(json.dumps({"type": "ping", "nonce": "ready"}))
+                self.assertEqual(json.loads(await socket.recv())["type"], "pong")
+                Clock.current = expiry
+                await socket.send(
+                    json.dumps({"type": "list_targets", "id": str(uuid4())})
+                )
+                with self.assertRaises(ConnectionClosed):
+                    await socket.recv()
+                finished.set_result(None)
+            except Exception as error:
+                if not finished.done():
+                    finished.set_exception(error)
+
+        with patch("guild_connector.tunnel_client.datetime", Clock):
+            async with serve(
+                handler, "127.0.0.1", 0, ssl=self.tls, subprotocols=["guild-tunnel-v5"]
+            ) as server:
+                connector = self.connector(
+                    server.sockets[0].getsockname()[1],
+                    credential=lambda: ("token", expiry),
+                )
+                task = asyncio.create_task(connector.run_forever(stop))
+                try:
+                    with self.assertLogs(
+                        "guild_connector.tunnel_client", level="WARNING"
+                    ):
+                        await asyncio.wait_for(finished, 3)
+                finally:
+                    stop.set()
+                    await asyncio.wait_for(task, 3)
+
+    async def test_target_listing_uses_acknowledged_renewal_expiry(self):
+        stop, rotated = asyncio.Event(), asyncio.Event()
+        finished = asyncio.get_running_loop().create_future()
+        initial = datetime.now(UTC)
+        old_expiry = initial + timedelta(minutes=1)
+        new_expiry = initial + timedelta(minutes=5)
+        credential = ["old", old_expiry]
+        request_id = str(uuid4())
+
+        class Clock(datetime):
+            current = initial
+
+            @classmethod
+            def now(cls, tz=None):
+                return cls.current
+
+        async def handler(socket):
+            try:
+                await socket.recv()
+                await socket.send(
+                    json.dumps(
+                        {"type": "ready", "protocol_version": 5, "max_in_flight": 2}
+                    )
+                )
+                credential[:] = ["new", new_expiry]
+                rotated.set()
+                self.assertEqual(
+                    json.loads(await socket.recv()),
+                    {"type": "authenticate", "token": "new"},
+                )
+                await socket.send(
+                    json.dumps(
+                        {"type": "authenticated", "expires_at": new_expiry.isoformat()}
+                    )
+                )
+                await socket.send(json.dumps({"type": "ping", "nonce": "renewed"}))
+                self.assertEqual(json.loads(await socket.recv())["type"], "pong")
+                Clock.current = old_expiry
+                await socket.send(
+                    json.dumps({"type": "list_targets", "id": request_id})
+                )
+                self.assertEqual(
+                    json.loads(await socket.recv()),
+                    {"type": "targets", "id": request_id, "names": ["local"]},
+                )
+                finished.set_result(None)
+                await stop.wait()
+            except Exception as error:
+                if not finished.done():
+                    finished.set_exception(error)
+
+        with patch("guild_connector.tunnel_client.datetime", Clock):
+            async with serve(
+                handler, "127.0.0.1", 0, ssl=self.tls, subprotocols=["guild-tunnel-v5"]
+            ) as server:
+                connector = self.connector(
+                    server.sockets[0].getsockname()[1],
+                    rotated=rotated,
+                    credential=lambda: tuple(credential),
+                )
+                task = asyncio.create_task(connector.run_forever(stop))
+                try:
+                    await asyncio.wait_for(finished, 3)
+                finally:
+                    stop.set()
+                    await asyncio.wait_for(task, 3)
+
+    async def test_target_listing_rejects_invalid_ids(self):
+        for request in (
+            {"type": "list_targets"},
+            {"type": "list_targets", "id": "not-a-uuid", "future_option": True},
+            {"type": "list_targets", "id": None},
+        ):
+            with self.subTest(request=request):
+                stop = asyncio.Event()
+
+                async def handler(socket):
+                    await socket.recv()
+                    await socket.send(
+                        json.dumps(
+                            {"type": "ready", "protocol_version": 5, "max_in_flight": 2}
+                        )
+                    )
+                    await socket.send(json.dumps(request))
+                    await socket.wait_closed()
+
+                async with serve(
+                    handler,
+                    "127.0.0.1",
+                    0,
+                    ssl=self.tls,
+                    subprotocols=["guild-tunnel-v5"],
+                ) as server:
+                    with self.assertRaisesRegex(
+                        ProtocolError, "Invalid target list request ID"
+                    ):
+                        await asyncio.wait_for(
+                            self.connector(
+                                server.sockets[0].getsockname()[1]
+                            ).run_forever(stop),
+                            3,
+                        )
+
+    async def test_large_target_list_does_not_disconnect_tunnel(self):
+        await self.check_target_list_limit(
+            tuple(f"private-name-{i}" for i in range(2049))
+        )
+
+    async def test_large_encoded_target_list_does_not_disconnect_tunnel(self):
+        await self.check_target_list_limit(("private-name-" + "x" * (4 * 1024 * 1024),))
+
+    async def check_target_list_limit(self, names):
+        stop = asyncio.Event()
+        reported = asyncio.get_running_loop().create_future()
+        request_id = str(uuid4())
+
+        async def handler(socket):
+            await socket.recv()
+            await socket.send(
+                json.dumps({"type": "ready", "protocol_version": 5, "max_in_flight": 2})
+            )
+            await socket.send(json.dumps({"type": "list_targets", "id": request_id}))
+            response = json.loads(await socket.recv())
+            await socket.send(json.dumps({"type": "ping", "nonce": "still-open"}))
+            heartbeat = json.loads(await socket.recv())
+            reported.set_result((response, heartbeat))
+            await stop.wait()
+
+        async with serve(
+            handler, "127.0.0.1", 0, ssl=self.tls, subprotocols=["guild-tunnel-v5"]
+        ) as server:
+            port = server.sockets[0].getsockname()[1]
+            connector = PrivateConnector(
+                tunnel=TunnelClient(
+                    base_url=f"https://127.0.0.1:{port}",
+                    ca_file=str(self.cert),
+                    credential=self.credential,
+                    target_names=names,
+                ),
+                destinations={},
+            )
+            task = asyncio.create_task(connector.run_forever(stop))
+            try:
+                with self.assertLogs(
+                    "guild_connector.tunnel_client", level="WARNING"
+                ) as logs:
+                    assert await asyncio.wait_for(reported, 3) == (
+                        {
+                            "type": "error",
+                            "id": request_id,
+                            "error_code": "targets_unavailable",
+                        },
+                        {"type": "pong", "nonce": "still-open"},
+                    )
+                encoded_size = len(
+                    json.dumps(
+                        {"type": "targets", "id": request_id, "names": names}
+                    ).encode()
+                )
+                self.assertEqual(len(logs.records), 1)
+                message = logs.records[0].getMessage()
+                self.assertIn(f"{len(names)} targets", message)
+                self.assertIn(f"{encoded_size} bytes", message)
+                self.assertNotIn("private-name", message)
+            finally:
+                stop.set()
+                await asyncio.wait_for(task, 3)
 
     async def test_gateway_base_url_preserves_optional_path_and_query(self):
         for scheme in ("https", "wss"):
@@ -161,7 +521,7 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                                 json.dumps(
                                     {
                                         "type": "ready",
-                                        "protocol_version": 4,
+                                        "protocol_version": 5,
                                         "max_in_flight": 1,
                                     }
                                 )
@@ -177,7 +537,13 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                             if not connected.done():
                                 connected.set_exception(error)
 
-                    async with serve(handler, "127.0.0.1", 0, ssl=self.tls) as server:
+                    async with serve(
+                        handler,
+                        "127.0.0.1",
+                        0,
+                        ssl=self.tls,
+                        subprotocols=["guild-tunnel-v5"],
+                    ) as server:
                         port = server.sockets[0].getsockname()[1]
                         connector = PrivateConnector(
                             tunnel=TunnelClient(
@@ -242,7 +608,7 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
             hello = json.loads(await socket.recv())
             self.assertEqual(hello["max_in_flight"], 128)
             await socket.send(
-                json.dumps({"type": "ready", "protocol_version": 4, "max_in_flight": 1})
+                json.dumps({"type": "ready", "protocol_version": 5, "max_in_flight": 1})
             )
             await socket.send(json.dumps(slow))
             self.assertEqual(json.loads(await socket.recv())["type"], "ack")
@@ -250,7 +616,9 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
             await socket.send(json.dumps(fast))
             await socket.wait_closed()
 
-        async with serve(handler, "127.0.0.1", 0, ssl=self.tls) as server:
+        async with serve(
+            handler, "127.0.0.1", 0, ssl=self.tls, subprotocols=["guild-tunnel-v5"]
+        ) as server:
             try:
                 connector = self.connector(
                     server.sockets[0].getsockname()[1], max_in_flight=128
@@ -271,7 +639,9 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
             )
             await socket.wait_closed()
 
-        async with serve(handler, "127.0.0.1", 0, ssl=self.tls) as server:
+        async with serve(
+            handler, "127.0.0.1", 0, ssl=self.tls, subprotocols=["guild-tunnel-v5"]
+        ) as server:
             connector = self.connector(server.sockets[0].getsockname()[1])
             with self.assertRaisesRegex(
                 ProtocolError, "Invalid Guild tunnel gateway connection handshake"
@@ -293,7 +663,7 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                 await socket.recv()
                 await socket.send(
                     json.dumps(
-                        {"type": "ready", "protocol_version": 4, "max_in_flight": 2}
+                        {"type": "ready", "protocol_version": 5, "max_in_flight": 2}
                     )
                 )
                 await socket.send(json.dumps(request))
@@ -328,7 +698,9 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                 if not refreshed.done():
                     refreshed.set_exception(error)
 
-        async with serve(handler, "127.0.0.1", 0, ssl=self.tls) as server:
+        async with serve(
+            handler, "127.0.0.1", 0, ssl=self.tls, subprotocols=["guild-tunnel-v5"]
+        ) as server:
             task = asyncio.create_task(
                 self.connector(
                     server.sockets[0].getsockname()[1],
@@ -359,11 +731,11 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                 )
                 hello = json.loads(await socket.recv())
                 self.assertEqual(
-                    hello, {"type": "hello", "protocol_version": 4, "max_in_flight": 2}
+                    hello, {"type": "hello", "protocol_version": 5, "max_in_flight": 2}
                 )
                 await socket.send(
                     json.dumps(
-                        {"type": "ready", "protocol_version": 4, "max_in_flight": 2}
+                        {"type": "ready", "protocol_version": 5, "max_in_flight": 2}
                     )
                 )
                 await socket.send(json.dumps(slow))
@@ -394,7 +766,9 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                 if not finished.done():
                     finished.set_exception(error)
 
-        async with serve(handler, "127.0.0.1", 0, ssl=self.tls) as server:
+        async with serve(
+            handler, "127.0.0.1", 0, ssl=self.tls, subprotocols=["guild-tunnel-v5"]
+        ) as server:
             task = asyncio.create_task(
                 self.connector(server.sockets[0].getsockname()[1]).run_forever(stop)
             )
@@ -416,7 +790,7 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                 await socket.recv()
                 await socket.send(
                     json.dumps(
-                        {"type": "ready", "protocol_version": 4, "max_in_flight": 2}
+                        {"type": "ready", "protocol_version": 5, "max_in_flight": 2}
                     )
                 )
                 await socket.send(json.dumps(request))
@@ -448,7 +822,9 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                     if not future.done():
                         future.set_exception(error)
 
-        async with serve(handler, "127.0.0.1", 0, ssl=self.tls) as server:
+        async with serve(
+            handler, "127.0.0.1", 0, ssl=self.tls, subprotocols=["guild-tunnel-v5"]
+        ) as server:
             task = asyncio.create_task(
                 self.connector(server.sockets[0].getsockname()[1]).run_forever(stop)
             )
@@ -475,13 +851,15 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
             connections += 1
             await socket.recv()
             await socket.send(
-                json.dumps({"type": "ready", "protocol_version": 4, "max_in_flight": 2})
+                json.dumps({"type": "ready", "protocol_version": 5, "max_in_flight": 2})
             )
             await socket.wait_closed()
             if not closed.done():
                 closed.set_result(None)
 
-        async with serve(handler, "127.0.0.1", 0, ssl=self.tls) as server:
+        async with serve(
+            handler, "127.0.0.1", 0, ssl=self.tls, subprotocols=["guild-tunnel-v5"]
+        ) as server:
             connector = self.connector(
                 server.sockets[0].getsockname()[1], credential=lambda: credential
             )
@@ -501,7 +879,7 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
         async def handler(socket):
             await socket.recv()
             await socket.send(
-                json.dumps({"type": "ready", "protocol_version": 4, "max_in_flight": 2})
+                json.dumps({"type": "ready", "protocol_version": 5, "max_in_flight": 2})
             )
             await socket.send(
                 json.dumps(
@@ -513,7 +891,9 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
             )
             await socket.wait_closed()
 
-        async with serve(handler, "127.0.0.1", 0, ssl=self.tls) as server:
+        async with serve(
+            handler, "127.0.0.1", 0, ssl=self.tls, subprotocols=["guild-tunnel-v5"]
+        ) as server:
             connector = self.connector(server.sockets[0].getsockname()[1])
             with self.assertRaisesRegex(ProtocolError, "Unexpected authentication"):
                 await asyncio.wait_for(connector.run_forever(asyncio.Event()), 2)
@@ -529,7 +909,7 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                 await socket.recv()
                 await socket.send(
                     json.dumps(
-                        {"type": "ready", "protocol_version": 4, "max_in_flight": 1}
+                        {"type": "ready", "protocol_version": 5, "max_in_flight": 1}
                     )
                 )
                 await socket.send(json.dumps(slow))
@@ -548,7 +928,9 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                 if not finished.done():
                     finished.set_exception(error)
 
-        async with serve(handler, "127.0.0.1", 0, ssl=self.tls) as server:
+        async with serve(
+            handler, "127.0.0.1", 0, ssl=self.tls, subprotocols=["guild-tunnel-v5"]
+        ) as server:
             task = asyncio.create_task(
                 self.connector(
                     server.sockets[0].getsockname()[1], max_in_flight=1
@@ -579,7 +961,7 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                 await socket.recv()
                 await socket.send(
                     json.dumps(
-                        {"type": "ready", "protocol_version": 4, "max_in_flight": 2}
+                        {"type": "ready", "protocol_version": 5, "max_in_flight": 2}
                     )
                 )
                 await socket.send(json.dumps(slow))
@@ -629,7 +1011,9 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                 if not finished.done():
                     finished.set_exception(error)
 
-        async with serve(handler, "127.0.0.1", 0, ssl=self.tls) as server:
+        async with serve(
+            handler, "127.0.0.1", 0, ssl=self.tls, subprotocols=["guild-tunnel-v5"]
+        ) as server:
             task = asyncio.create_task(
                 self.connector(server.sockets[0].getsockname()[1]).run_forever(stop)
             )
@@ -655,7 +1039,7 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                 await socket.recv()
                 await socket.send(
                     json.dumps(
-                        {"type": "ready", "protocol_version": 4, "max_in_flight": 2}
+                        {"type": "ready", "protocol_version": 5, "max_in_flight": 2}
                     )
                 )
                 if number == 1:
@@ -679,7 +1063,9 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                 if not finished.done():
                     finished.set_exception(error)
 
-        async with serve(handler, "127.0.0.1", 0, ssl=self.tls) as server:
+        async with serve(
+            handler, "127.0.0.1", 0, ssl=self.tls, subprotocols=["guild-tunnel-v5"]
+        ) as server:
             task = asyncio.create_task(
                 self.connector(server.sockets[0].getsockname()[1]).run_forever(stop)
             )
@@ -754,7 +1140,9 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
         async def handler(socket):
             connected.append(socket)
 
-        async with serve(handler, "127.0.0.1", 0, ssl=self.tls) as server:
+        async with serve(
+            handler, "127.0.0.1", 0, ssl=self.tls, subprotocols=["guild-tunnel-v5"]
+        ) as server:
             connector = PrivateConnector(
                 tunnel=TunnelClient(
                     base_url=f"https://127.0.0.1:{server.sockets[0].getsockname()[1]}",
@@ -807,7 +1195,7 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                     json.dumps(
                         {
                             "type": "ready",
-                            "protocol_version": 4,
+                            "protocol_version": 5,
                             "max_in_flight": 2,
                         }
                     )
@@ -815,7 +1203,9 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                 await socket.send(json.dumps(self.request("/unauthorized")))
 
             ca_file = str(certificate if trust_server else self.cert)
-            async with serve(handler, "127.0.0.1", 0, ssl=self.tls) as server:
+            async with serve(
+                handler, "127.0.0.1", 0, ssl=self.tls, subprotocols=["guild-tunnel-v5"]
+            ) as server:
                 connector = self.connector(
                     server.sockets[0].getsockname()[1], ca_file=ca_file
                 )

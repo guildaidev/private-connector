@@ -77,6 +77,13 @@ uv run guild-private-connector run --config connector.json \
 - Disabled, deleted, or unavailable private routes do not fall back to direct
   access. Uncertain requests are not replayed. Cancellation cannot undo a write.
 - Streaming calls require tunnel protocol 4.
+- Target discovery uses tunnel protocol 5. Guild requests target names over the
+  existing connection. The connector never sends destination URLs in this reply.
+  The connector negotiates protocol 5 with a compatible gateway. With a protocol-4
+  gateway, forwarding and streaming continue, but target discovery is unavailable.
+  Discovery is also unavailable when the response exceeds 2,048 targets or
+  4 MiB encoded. The connector logs the target count and encoded size without
+  target names or URLs. Existing forwarding and streaming continue.
 
 ## Architecture and tests
 

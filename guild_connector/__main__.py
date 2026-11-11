@@ -265,6 +265,7 @@ async def _run(
         max_in_flight=config.get("max_in_flight", 16),
         rotated=rotated,
         refresh_requested=refresh_requested,
+        target_names=tuple(sorted(destinations)),
     )
     connector = PrivateConnector(
         tunnel=tunnel,
