@@ -261,6 +261,8 @@ class TunnelClient:
                         raise ProtocolError("Invalid heartbeat")
                     await socket.send(json.dumps({"type": "pong", "nonce": nonce}))
                 elif kind == "list_targets":
+                    if expires_at <= datetime.now(UTC):
+                        raise TimeoutError("Tunnel authorization expired")
                     if version < 5:
                         raise ProtocolError(
                             "Unexpected Guild tunnel gateway frame type"

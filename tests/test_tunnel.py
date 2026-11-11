@@ -12,9 +12,11 @@ from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 from uuid import uuid4
 
 from websockets.asyncio.server import serve
+from websockets.exceptions import ConnectionClosed
 
 from guild_connector.connector import PrivateConnector
 from guild_connector.models import Destination, ProtocolError
@@ -276,6 +278,125 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 stop.set()
                 await asyncio.wait_for(task, 3)
+
+    async def test_target_listing_after_expiry_closes_without_names(self):
+        stop = asyncio.Event()
+        finished = asyncio.get_running_loop().create_future()
+        initial = datetime.now(UTC)
+        expiry = initial + timedelta(minutes=1)
+
+        class Clock(datetime):
+            current = initial
+
+            @classmethod
+            def now(cls, tz=None):
+                return cls.current
+
+        async def handler(socket):
+            try:
+                await socket.recv()
+                await socket.send(
+                    json.dumps(
+                        {"type": "ready", "protocol_version": 5, "max_in_flight": 2}
+                    )
+                )
+                await socket.send(json.dumps({"type": "ping", "nonce": "ready"}))
+                self.assertEqual(json.loads(await socket.recv())["type"], "pong")
+                Clock.current = expiry
+                await socket.send(
+                    json.dumps({"type": "list_targets", "id": str(uuid4())})
+                )
+                with self.assertRaises(ConnectionClosed):
+                    await socket.recv()
+                finished.set_result(None)
+            except Exception as error:
+                if not finished.done():
+                    finished.set_exception(error)
+
+        with patch("guild_connector.tunnel_client.datetime", Clock):
+            async with serve(
+                handler, "127.0.0.1", 0, ssl=self.tls, subprotocols=["guild-tunnel-v5"]
+            ) as server:
+                connector = self.connector(
+                    server.sockets[0].getsockname()[1],
+                    credential=lambda: ("token", expiry),
+                )
+                task = asyncio.create_task(connector.run_forever(stop))
+                try:
+                    with self.assertLogs(
+                        "guild_connector.tunnel_client", level="WARNING"
+                    ):
+                        await asyncio.wait_for(finished, 3)
+                finally:
+                    stop.set()
+                    await asyncio.wait_for(task, 3)
+
+    async def test_target_listing_uses_acknowledged_renewal_expiry(self):
+        stop, rotated = asyncio.Event(), asyncio.Event()
+        finished = asyncio.get_running_loop().create_future()
+        initial = datetime.now(UTC)
+        old_expiry = initial + timedelta(minutes=1)
+        new_expiry = initial + timedelta(minutes=5)
+        credential = ["old", old_expiry]
+        request_id = str(uuid4())
+
+        class Clock(datetime):
+            current = initial
+
+            @classmethod
+            def now(cls, tz=None):
+                return cls.current
+
+        async def handler(socket):
+            try:
+                await socket.recv()
+                await socket.send(
+                    json.dumps(
+                        {"type": "ready", "protocol_version": 5, "max_in_flight": 2}
+                    )
+                )
+                credential[:] = ["new", new_expiry]
+                rotated.set()
+                self.assertEqual(
+                    json.loads(await socket.recv()),
+                    {"type": "authenticate", "token": "new"},
+                )
+                await socket.send(
+                    json.dumps(
+                        {"type": "authenticated", "expires_at": new_expiry.isoformat()}
+                    )
+                )
+                await socket.send(json.dumps({"type": "ping", "nonce": "renewed"}))
+                self.assertEqual(json.loads(await socket.recv())["type"], "pong")
+                Clock.current = old_expiry
+                await socket.send(
+                    json.dumps({"type": "list_targets", "id": request_id})
+                )
+                self.assertEqual(
+                    json.loads(await socket.recv()),
+                    {"type": "targets", "id": request_id, "names": ["local"]},
+                )
+                finished.set_result(None)
+                await stop.wait()
+            except Exception as error:
+                if not finished.done():
+                    finished.set_exception(error)
+
+        with patch("guild_connector.tunnel_client.datetime", Clock):
+            async with serve(
+                handler, "127.0.0.1", 0, ssl=self.tls, subprotocols=["guild-tunnel-v5"]
+            ) as server:
+                connector = self.connector(
+                    server.sockets[0].getsockname()[1],
+                    rotated=rotated,
+                    credential=lambda: tuple(credential),
+                )
+                task = asyncio.create_task(connector.run_forever(stop))
+                try:
+                    await asyncio.wait_for(finished, 3)
+                finally:
+                    stop.set()
+                    await asyncio.wait_for(task, 3)
 
     async def test_target_listing_rejects_invalid_ids(self):
         for request in (
