@@ -63,6 +63,11 @@ Guild requests configured target names over tunnel protocol 5. The connector
 replies with names from its loaded configuration and does not send destination
 URLs. Guild checks a target name before sending an HTTP call. The connector
 still checks the name against its local destination map before forwarding.
+Discovery is unavailable when the response exceeds 2,048 targets or 4 MiB
+encoded. The connector sends a `targets_unavailable` error and logs the target
+count and encoded size without names or URLs. The tunnel remains open, and
+forwarding and streaming continue. Discovery is also unavailable with a
+protocol-4 gateway.
 
 An acknowledgement means the connector received a request. It does not mean
 the service completed the request. If the connection drops after dispatch, the

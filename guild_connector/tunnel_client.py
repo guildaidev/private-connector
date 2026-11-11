@@ -276,10 +276,16 @@ class TunnelClient:
                             "names": self._target_names,
                         }
                     )
-                    if (
-                        len(self._target_names) > 2048
-                        or len(response.encode()) > 4 * 1024 * 1024
-                    ):
+                    target_count = len(self._target_names)
+                    encoded_size = len(response.encode())
+                    if target_count > 2048 or encoded_size > 4 * 1024 * 1024:
+                        log.warning(
+                            "Target discovery unavailable: %d targets, "
+                            "encoded response %d bytes (limits: 2048 targets, "
+                            "4194304 bytes)",
+                            target_count,
+                            encoded_size,
+                        )
                         response = json.dumps(
                             {
                                 "type": "error",

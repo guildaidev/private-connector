@@ -81,6 +81,9 @@ uv run guild-private-connector run --config connector.json \
   existing connection. The connector never sends destination URLs in this reply.
   The connector negotiates protocol 5 with a compatible gateway. With a protocol-4
   gateway, forwarding and streaming continue, but target discovery is unavailable.
+  Discovery is also unavailable when the response exceeds 2,048 targets or
+  4 MiB encoded. The connector logs the target count and encoded size without
+  target names or URLs. Existing forwarding and streaming continue.
 
 ## Architecture and tests
 

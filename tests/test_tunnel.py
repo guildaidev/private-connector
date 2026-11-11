@@ -314,6 +314,14 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                         )
 
     async def test_large_target_list_does_not_disconnect_tunnel(self):
+        await self.check_target_list_limit(
+            tuple(f"private-name-{i}" for i in range(2049))
+        )
+
+    async def test_large_encoded_target_list_does_not_disconnect_tunnel(self):
+        await self.check_target_list_limit(("private-name-" + "x" * (4 * 1024 * 1024),))
+
+    async def check_target_list_limit(self, names):
         stop = asyncio.Event()
         reported = asyncio.get_running_loop().create_future()
         request_id = str(uuid4())
@@ -339,20 +347,33 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                     base_url=f"https://127.0.0.1:{port}",
                     ca_file=str(self.cert),
                     credential=self.credential,
-                    target_names=tuple(str(i) for i in range(2049)),
+                    target_names=names,
                 ),
                 destinations={},
             )
             task = asyncio.create_task(connector.run_forever(stop))
             try:
-                assert await asyncio.wait_for(reported, 3) == (
-                    {
-                        "type": "error",
-                        "id": request_id,
-                        "error_code": "targets_unavailable",
-                    },
-                    {"type": "pong", "nonce": "still-open"},
+                with self.assertLogs(
+                    "guild_connector.tunnel_client", level="WARNING"
+                ) as logs:
+                    assert await asyncio.wait_for(reported, 3) == (
+                        {
+                            "type": "error",
+                            "id": request_id,
+                            "error_code": "targets_unavailable",
+                        },
+                        {"type": "pong", "nonce": "still-open"},
+                    )
+                encoded_size = len(
+                    json.dumps(
+                        {"type": "targets", "id": request_id, "names": names}
+                    ).encode()
                 )
+                self.assertEqual(len(logs.records), 1)
+                message = logs.records[0].getMessage()
+                self.assertIn(f"{len(names)} targets", message)
+                self.assertIn(f"{encoded_size} bytes", message)
+                self.assertNotIn("private-name", message)
             finally:
                 stop.set()
                 await asyncio.wait_for(task, 3)
