@@ -258,11 +258,12 @@ async def _run(
         raise ProtocolError("Enrollment is not complete")
     rotated = asyncio.Event()
     refresh_requested = asyncio.Event()
+    if "max_in_flight" in config:
+        logging.warning("max_in_flight is ignored; Guild controls the operating limit")
     tunnel = TunnelClient(
         base_url=identity.gateway_url or "",
         ca_file=config.get("gateway_ca"),
         credential=identity.credential,
-        max_in_flight=config.get("max_in_flight", 16),
         rotated=rotated,
         refresh_requested=refresh_requested,
         target_names=tuple(sorted(destinations)),

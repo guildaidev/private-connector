@@ -7,6 +7,17 @@ does not run agents, LLM calls, or a secret store.
 Guild keeps integration code, credential resolution, and access checks.
 Integration credentials pass through the tunnel in request headers or bodies.
 
+The connector has a fixed ceiling of 4,096 concurrent requests per tunnel. Guild
+controls the operating limit within that ceiling. Routine limit changes do not
+require a connector restart. Older `max_in_flight` configuration values are
+accepted but ignored.
+
+Memory admission is automatic on Linux. The connector reads its container memory
+limit and usage, reserves space for active calls, and refuses new work with
+`connector_busy` before acknowledgement or local forwarding when the budget is
+full. Active streams and tunnel control messages continue. No memory tuning
+field is required. See [Memory protection](DEPLOYMENT.md#memory-protection).
+
 ## Set up a connector
 
 1. As an account admin, open **Settings → Private connectors**.
@@ -28,7 +39,6 @@ Example configuration; use the control-plane URL and connector ID from the app:
   "control_plane_url": "https://api.example.com",
   "connector_id": "00000000-0000-0000-0000-000000000001",
   "identity_directory": "/var/lib/guild-connector",
-  "max_in_flight": 16,
   "destinations": {
     "foo": "https://foo.internal:8443"
   }

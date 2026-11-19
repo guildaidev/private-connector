@@ -6,7 +6,8 @@ import asyncio
 import logging
 import os
 import ssl
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
+from contextlib import aclosing
 
 import httpx
 
@@ -39,7 +40,7 @@ class PrivateConnector:
 
     async def stream_forward(
         self, delivery: Delivery
-    ) -> AsyncIterator[dict[str, object]]:
+    ) -> AsyncGenerator[dict[str, object], None]:
         destination = self._destinations.get(delivery.target_id)
         if delivery.is_expired():
             error_code = "delivery_expired"
@@ -47,10 +48,11 @@ class PrivateConnector:
             error_code = "unknown_target"
         else:
             try:
-                async for frame in self._forwarder.stream_forward(
-                    destination, delivery
-                ):
-                    yield frame
+                async with aclosing(
+                    self._forwarder.stream_forward(destination, delivery)
+                ) as frames:
+                    async for frame in frames:
+                        yield frame
                 return
             except (httpx.HTTPError, OSError, ValueError) as error:
                 error_code = self._forward_error(error, destination, delivery)
