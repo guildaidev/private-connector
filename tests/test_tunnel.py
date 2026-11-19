@@ -609,7 +609,7 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                     {
                         "type": "ready",
                         "protocol_version": 5,
-                        "max_in_flight": 65,
+                        "max_in_flight": 4097,
                     }
                 )
             )
@@ -628,7 +628,7 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
 
         async def handler(socket):
             hello = json.loads(await socket.recv())
-            self.assertEqual(hello["max_in_flight"], 64)
+            self.assertEqual(hello["max_in_flight"], 4096)
             await socket.send(
                 json.dumps({"type": "ready", "protocol_version": 5, "max_in_flight": 1})
             )
@@ -751,7 +751,8 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                 )
                 hello = json.loads(await socket.recv())
                 self.assertEqual(
-                    hello, {"type": "hello", "protocol_version": 5, "max_in_flight": 64}
+                    hello,
+                    {"type": "hello", "protocol_version": 5, "max_in_flight": 4096},
                 )
                 await socket.send(
                     json.dumps(

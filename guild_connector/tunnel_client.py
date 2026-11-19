@@ -7,7 +7,8 @@ import json
 import logging
 import random
 import ssl
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
+from contextlib import aclosing
 from datetime import UTC, datetime, timedelta
 from unicodedata import category
 from urllib.parse import urlsplit, urlunsplit
@@ -76,7 +77,7 @@ class TunnelClient:
         self,
         forward: Callable[[Delivery], Awaitable[ProxyResponse]],
         stop: asyncio.Event,
-        stream_forward: Callable[[Delivery], AsyncIterator[dict[str, object]]]
+        stream_forward: Callable[[Delivery], AsyncGenerator[dict[str, object], None]]
         | None = None,
     ) -> None:
         retry_seconds = 1
@@ -181,7 +182,8 @@ class TunnelClient:
         forward: Callable[[Delivery], Awaitable[ProxyResponse]],
         stop: asyncio.Event,
         expires_at: datetime,
-        stream_forward: Callable[[Delivery], AsyncIterator[dict[str, object]]] | None,
+        stream_forward: Callable[[Delivery], AsyncGenerator[dict[str, object], None]]
+        | None,
     ) -> None:
         version = 5 if socket.subprotocol == DISCOVERY_SUBPROTOCOL else 4
         await socket.send(
@@ -221,10 +223,11 @@ class TunnelClient:
             if delivery.stream_response:
                 if stream_forward is None:
                     raise ProtocolError("Streaming forwarder is not configured")
-                async for frame in stream_forward(delivery):
-                    if frame["type"] == "response_chunk":
-                        await credits[delivery.id].acquire()
-                    await socket.send(json.dumps(frame))
+                async with aclosing(stream_forward(delivery)) as frames:
+                    async for frame in frames:
+                        if frame["type"] == "response_chunk":
+                            await credits[delivery.id].acquire()
+                        await socket.send(json.dumps(frame))
             else:
                 result = await forward(delivery)
                 await socket.send(encode_response(result))

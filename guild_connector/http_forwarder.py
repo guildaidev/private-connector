@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from base64 import b64encode
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 from http.cookiejar import Cookie, CookieJar, DefaultCookiePolicy
 from urllib.request import Request
@@ -13,6 +13,7 @@ import httpx
 
 from .models import Delivery, Destination, ProxyResponse
 from .protocol import (
+    MAX_IN_FLIGHT,
     MAX_STREAM_BYTES,
     MAX_STREAM_CHUNK_BYTES,
     response_body_limit,
@@ -31,6 +32,7 @@ class _RejectCookies(DefaultCookiePolicy):
 class HttpForwarder:
     def __init__(self) -> None:
         self._client = httpx.AsyncClient(
+            limits=httpx.Limits(max_connections=MAX_IN_FLIGHT),
             trust_env=False,
             follow_redirects=False,
             timeout=None,
@@ -76,7 +78,7 @@ class HttpForwarder:
 
     async def stream_forward(
         self, destination: Destination, delivery: Delivery
-    ) -> AsyncIterator[dict[str, object]]:
+    ) -> AsyncGenerator[dict[str, object], None]:
         prepared = self._prepare(destination, delivery)
         if isinstance(prepared, ProxyResponse):
             yield {

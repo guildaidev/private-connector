@@ -7,7 +7,7 @@ does not run agents, LLM calls, or a secret store.
 Guild keeps integration code, credential resolution, and access checks.
 Integration credentials pass through the tunnel in request headers or bodies.
 
-The connector has a fixed ceiling of 64 concurrent requests per tunnel. Guild
+The connector has a fixed ceiling of 4,096 concurrent requests per tunnel. Guild
 controls the operating limit within that ceiling. Routine limit changes do not
 require a connector restart. Older `max_in_flight` configuration values are
 accepted but ignored.
