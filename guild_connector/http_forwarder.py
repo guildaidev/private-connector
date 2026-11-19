@@ -64,7 +64,9 @@ class HttpForwarder:
             if limit < 0:
                 return too_large
             body = bytearray()
-            async for chunk in response.aiter_raw():
+            async for chunk in response.aiter_raw(
+                chunk_size=min(MAX_STREAM_CHUNK_BYTES, limit + 1)
+            ):
                 if len(body) + len(chunk) > limit:
                     return too_large
                 body.extend(chunk)

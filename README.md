@@ -12,6 +12,12 @@ controls the operating limit within that ceiling. Routine limit changes do not
 require a connector restart. Older `max_in_flight` configuration values are
 accepted but ignored.
 
+Memory admission is automatic on Linux. The connector reads its container memory
+limit and usage, reserves space for active calls, and refuses new work with
+`connector_busy` before acknowledgement or local forwarding when the budget is
+full. Active streams and tunnel control messages continue. No memory tuning
+field is required. See [Memory protection](DEPLOYMENT.md#memory-protection).
+
 ## Set up a connector
 
 1. As an account admin, open **Settings → Private connectors**.
