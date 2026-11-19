@@ -120,15 +120,12 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
             "timeout": {"connect": 30, "read": 30, "write": 30, "pool": 30},
         }
 
-    def connector(
-        self, port, max_in_flight=2, ca_file=None, rotated=None, credential=None
-    ):
+    def connector(self, port, ca_file=None, rotated=None, credential=None):
         return PrivateConnector(
             tunnel=TunnelClient(
                 base_url=f"https://127.0.0.1:{port}",
                 ca_file=ca_file or str(self.cert),
                 credential=credential or self.credential,
-                max_in_flight=max_in_flight,
                 rotated=rotated,
                 target_names=("local",),
             ),
@@ -590,23 +587,34 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                         credential=self.credential,
                     )
 
-    def test_requested_capacity_requires_positive_integer(self):
-        for requested in (0, -1, True, 1.5, "128"):
-            with self.subTest(requested=requested):
-                with self.assertRaisesRegex(ProtocolError, "positive integer"):
-                    TunnelClient(
-                        base_url="https://gateway.test",
-                        ca_file=str(self.cert),
-                        credential=self.credential,
-                        max_in_flight=requested,
-                    )
+    async def test_gateway_cannot_raise_fixed_safety_ceiling(self):
+        async def handler(socket):
+            await socket.recv()
+            await socket.send(
+                json.dumps(
+                    {
+                        "type": "ready",
+                        "protocol_version": 5,
+                        "max_in_flight": 65,
+                    }
+                )
+            )
+            await socket.wait_closed()
+
+        async with serve(
+            handler, "127.0.0.1", 0, ssl=self.tls, subprotocols=["guild-tunnel-v5"]
+        ) as server:
+            connector = self.connector(server.sockets[0].getsockname()[1])
+            with self.assertRaisesRegex(ProtocolError, "handshake"):
+                await asyncio.wait_for(connector.run_forever(asyncio.Event()), 3)
+        self.assertEqual(self.requests, [])
 
     async def test_client_uses_negotiated_lower_capacity(self):
         slow, fast = self.request("/slow"), self.request("/fast")
 
         async def handler(socket):
             hello = json.loads(await socket.recv())
-            self.assertEqual(hello["max_in_flight"], 128)
+            self.assertEqual(hello["max_in_flight"], 64)
             await socket.send(
                 json.dumps({"type": "ready", "protocol_version": 5, "max_in_flight": 1})
             )
@@ -620,9 +628,7 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
             handler, "127.0.0.1", 0, ssl=self.tls, subprotocols=["guild-tunnel-v5"]
         ) as server:
             try:
-                connector = self.connector(
-                    server.sockets[0].getsockname()[1], max_in_flight=128
-                )
+                connector = self.connector(server.sockets[0].getsockname()[1])
                 with self.assertRaisesRegex(
                     ProtocolError, "exceeded negotiated request capacity"
                 ):
@@ -731,7 +737,7 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                 )
                 hello = json.loads(await socket.recv())
                 self.assertEqual(
-                    hello, {"type": "hello", "protocol_version": 5, "max_in_flight": 2}
+                    hello, {"type": "hello", "protocol_version": 5, "max_in_flight": 64}
                 )
                 await socket.send(
                     json.dumps(
@@ -932,9 +938,7 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
             handler, "127.0.0.1", 0, ssl=self.tls, subprotocols=["guild-tunnel-v5"]
         ) as server:
             task = asyncio.create_task(
-                self.connector(
-                    server.sockets[0].getsockname()[1], max_in_flight=1
-                ).run_forever(stop)
+                self.connector(server.sockets[0].getsockname()[1]).run_forever(stop)
             )
             try:
                 await asyncio.wait_for(finished, 5)

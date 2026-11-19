@@ -231,3 +231,13 @@ Guild's source or backend image.
 GitHub packages may initially be private; the workflow does not make the source
 repository or packages public. Use new versions for releases and security fixes.
 Publication is not deployment and does not imply production sign-off.
+
+## Concurrency
+
+Each tunnel has a fixed safety ceiling of 64 concurrent requests. Guild controls
+the operating limit within that ceiling. A lower operating limit lets active
+calls finish before admitting more calls. Routine changes require no restart.
+
+Before upgrading a connector with a custom concurrency setting, ask Guild to set
+the intended operating limit. Legacy JSON `max_in_flight` and Helm
+`connector.maxInFlight` values are accepted but ignored.

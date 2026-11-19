@@ -17,7 +17,7 @@ from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketException
 
 from .models import Delivery, ProtocolError, ProxyResponse
-from .protocol import MAX_FRAME_BYTES, STREAM_WINDOW, encode_response
+from .protocol import MAX_FRAME_BYTES, MAX_IN_FLIGHT, STREAM_WINDOW, encode_response
 
 log = logging.getLogger(__name__)
 DISCOVERY_SUBPROTOCOL = "guild-tunnel-v5"
@@ -36,7 +36,6 @@ class TunnelClient:
         base_url: str,
         credential: Callable[[], tuple[str, datetime]],
         ca_file: str | None = None,
-        max_in_flight: int = 16,
         rotated: asyncio.Event | None = None,
         refresh_requested: asyncio.Event | None = None,
         target_names: tuple[str, ...] = (),
@@ -54,8 +53,6 @@ class TunnelClient:
                 "Gateway URL must use HTTPS/WSS, include a hostname, "
                 "and have no credentials, fragment, or control characters"
             )
-        if type(max_in_flight) is not int or max_in_flight < 1:
-            raise ProtocolError("max_in_flight must be a positive integer")
         self._url = urlunsplit(
             (
                 "wss",
@@ -69,7 +66,6 @@ class TunnelClient:
         self._rotated = rotated
         self._refresh_requested = refresh_requested
         self._credential = credential
-        self._max_in_flight = max_in_flight
         self._target_names = target_names
         self.connected = False
 
@@ -189,7 +185,7 @@ class TunnelClient:
                 {
                     "type": "hello",
                     "protocol_version": version,
-                    "max_in_flight": self._max_in_flight,
+                    "max_in_flight": MAX_IN_FLIGHT,
                 }
             )
         )
@@ -199,7 +195,7 @@ class TunnelClient:
             or type(ready.get("protocol_version")) is not int
             or ready.get("protocol_version") != version
             or type(ready.get("max_in_flight")) is not int
-            or not 1 <= ready["max_in_flight"] <= self._max_in_flight
+            or not 1 <= ready["max_in_flight"] <= MAX_IN_FLIGHT
         ):
             raise ProtocolError("Invalid Guild tunnel gateway connection handshake")
         capacity = ready["max_in_flight"]

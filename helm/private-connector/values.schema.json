@@ -17,7 +17,7 @@
     "imagePullSecrets": {"type": "array", "items": {"type": "object"}},
     "connector": {
       "type": "object", "additionalProperties": false,
-      "required": ["id", "controlPlaneUrl", "destinations", "maxInFlight"],
+      "required": ["id", "controlPlaneUrl", "destinations"],
       "properties": {
         "id": {"type": "string", "pattern": "^[a-fA-F0-9]{8}(-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}$"},
         "controlPlaneUrl": {"type": "string", "pattern": "^https://[^/?#@]+(/[^?#]*)?$"},
@@ -26,7 +26,7 @@
           "propertyNames": {"minLength": 1},
           "additionalProperties": {"type": "string", "pattern": "^https?://[^/?#@]+/?$"}
         },
-        "maxInFlight": {"type": "integer", "minimum": 1}
+        "maxInFlight": {"type": "integer", "minimum": 1, "description": "Deprecated and ignored. Guild controls the operating limit."}
       }
     },
     "enrollment": {

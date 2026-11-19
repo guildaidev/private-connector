@@ -7,6 +7,11 @@ does not run agents, LLM calls, or a secret store.
 Guild keeps integration code, credential resolution, and access checks.
 Integration credentials pass through the tunnel in request headers or bodies.
 
+The connector has a fixed ceiling of 64 concurrent requests per tunnel. Guild
+controls the operating limit within that ceiling. Routine limit changes do not
+require a connector restart. Older `max_in_flight` configuration values are
+accepted but ignored.
+
 ## Set up a connector
 
 1. As an account admin, open **Settings → Private connectors**.
@@ -28,7 +33,6 @@ Example configuration; use the control-plane URL and connector ID from the app:
   "control_plane_url": "https://api.example.com",
   "connector_id": "00000000-0000-0000-0000-000000000001",
   "identity_directory": "/var/lib/guild-connector",
-  "max_in_flight": 16,
   "destinations": {
     "foo": "https://foo.internal:8443"
   }
