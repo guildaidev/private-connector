@@ -21,7 +21,7 @@ field is required. See [Memory protection](DEPLOYMENT.md#memory-protection).
 ## Set up a connector
 
 1. As an account admin, open **Settings → Private connectors**.
-   Create the account's connector.
+   Create a connector for the account.
 2. Choose Docker or Helm. Enter Guild's released image digest and your internal
    service addresses. Download the deployment file. This file has no expiry.
 3. Create and download the enrollment token separately. New tokens last three
@@ -54,7 +54,7 @@ once per credential. Existing credential grants and defaults control access.
 Credential editors can select a connector; account admins manage connectors and
 enrollment. **Enabled** is an administrative setting, not a live health check.
 
-Each account permits one connector and up to four non-revoked tunnel identities.
+Each connector permits up to four non-revoked tunnel identities.
 Pending or expired enrollments still count until revoked. Enroll each replica
 separately. Give each replica a private, persistent identity directory; never
 share or clone that directory. Its saved token is a bearer credential.
@@ -67,6 +67,9 @@ the token file after successful enrollment; keep the identity directory.
 uv run guild-private-connector run --config connector.json \
   --enrollment-token-file /secure/path/token
 ```
+
+For internal services signed by a private CA, set `destination_ca` to a mounted
+PEM CA bundle. See [Private CA setup](DEPLOYMENT.md#private-ca-for-internal-https-services).
 
 ## Supported behavior
 

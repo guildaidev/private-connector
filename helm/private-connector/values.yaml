@@ -33,6 +33,11 @@ gatewayCA:
   existingConfigMap: ""
   key: ca.pem
 
+# Optional PEM CA bundle for HTTPS destinations inside your network.
+destinationCA:
+  existingConfigMap: ""
+  key: ca.pem
+
 resources:
   requests:
     cpu: 100m

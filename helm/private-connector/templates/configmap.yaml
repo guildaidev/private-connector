@@ -13,4 +13,7 @@ data:
     {{- if .Values.gatewayCA.existingConfigMap }}
     {{- $_ := set $config "gateway_ca" "/etc/guild/gateway-ca/ca.pem" }}
     {{- end }}
+    {{- if .Values.destinationCA.existingConfigMap }}
+    {{- $_ := set $config "destination_ca" "/etc/guild/destination-ca/ca.pem" }}
+    {{- end }}
     {{- $config | toPrettyJson | nindent 4 }}

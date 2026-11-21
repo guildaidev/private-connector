@@ -20,10 +20,16 @@ log = logging.getLogger(__name__)
 
 
 class PrivateConnector:
-    def __init__(self, *, tunnel: TunnelClient, destinations: dict[str, Destination]):
+    def __init__(
+        self,
+        *,
+        tunnel: TunnelClient,
+        destinations: dict[str, Destination],
+        destination_ca: str | None = None,
+    ):
         self._tunnel = tunnel
         self._destinations = destinations
-        self._forwarder = HttpForwarder()
+        self._forwarder = HttpForwarder(ca_file=destination_ca)
 
     async def forward(self, delivery: Delivery) -> ProxyResponse:
         destination = self._destinations.get(delivery.target_id)

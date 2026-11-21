@@ -40,7 +40,8 @@ the [deployment files](DEPLOYMENT.md).
   for Guild's enrollment endpoint or tunnel endpoint, respectively. Normal
   Guild endpoints need neither setting. These files contain public CA
   certificates, not client certificates or connector credentials. The settings
-  do not configure trust for local destinations.
+  do not configure trust for local destinations. Use `destination_ca` to add
+  private CA certificates for HTTPS destinations. Hostname checks remain enabled.
 - Guild credentials may travel in forwarded request headers or bodies. The
   connector does not store them. Restrict access to the connector host and its
   logs, and give integration credentials only the access they need.
