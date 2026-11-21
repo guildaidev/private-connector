@@ -6,7 +6,7 @@ import asyncio
 import logging
 import os
 import ssl
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from contextlib import aclosing
 
 import httpx
@@ -26,10 +26,13 @@ class PrivateConnector:
         tunnel: TunnelClient,
         destinations: dict[str, Destination],
         destination_ca: str | None = None,
+        blocked_methods: Sequence[str] = (),
     ):
         self._tunnel = tunnel
         self._destinations = destinations
-        self._forwarder = HttpForwarder(ca_file=destination_ca)
+        self._forwarder = HttpForwarder(
+            ca_file=destination_ca, blocked_methods=blocked_methods
+        )
 
     async def forward(self, delivery: Delivery) -> ProxyResponse:
         destination = self._destinations.get(delivery.target_id)

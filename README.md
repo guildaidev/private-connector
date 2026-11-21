@@ -71,6 +71,9 @@ uv run guild-private-connector run --config connector.json \
 For internal services signed by a private CA, set `destination_ca` to a mounted
 PEM CA bundle. See [Private CA setup](DEPLOYMENT.md#private-ca-for-internal-https-services).
 
+To block HTTP verbs such as DELETE at the connector, configure
+[`blocked_methods`](DEPLOYMENT.md#block-http-methods).
+
 ## Supported behavior
 
 - REST/OpenAPI, MCP HTTP, and Guild HTTP tools can use the connector when their

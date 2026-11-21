@@ -46,7 +46,9 @@ the [deployment files](DEPLOYMENT.md).
   connector does not store them. Restrict access to the connector host and its
   logs, and give integration credentials only the access they need.
 - The target map limits destination origins. It does not restrict API paths or
-  operations within a destination. Apply your own service authorization and
+  operations within a destination. The optional `blocked_methods` policy refuses
+  HTTP verbs before forwarding. It does not inspect request bodies or application
+  actions. Apply your own service authorization and
   network egress rules where needed.
 - The connector does not follow HTTP redirects or use environment proxies for
   forwarded requests. It does not retain response cookies between requests.

@@ -43,6 +43,13 @@ class ConfigurationCliTests(unittest.TestCase):
         self.assertEqual(stderr.getvalue(), expected + "\n")
         self.assertFalse(self.directory.exists())
 
+    def test_invalid_method_blocklist_stops_before_enrollment(self):
+        self.config["blocked_methods"] = "DELETE"
+        self.path.write_text(json.dumps(self.config))
+        self.assert_config_error(
+            "Setting blocked_methods must be a list of HTTP method names"
+        )
+
     def test_missing_file_reports_read_failure(self):
         self.assert_config_error(
             "Cannot read connector configuration: No such file or directory"

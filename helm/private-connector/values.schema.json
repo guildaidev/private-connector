@@ -26,6 +26,7 @@
           "propertyNames": {"minLength": 1},
           "additionalProperties": {"type": "string", "pattern": "^https?://[^/?#@]+/?$"}
         },
+        "blockedMethods": {"type": "array", "items": {"type": "string", "pattern": "^[A-Za-z]{1,16}$"}},
         "maxInFlight": {"type": "integer", "minimum": 1, "description": "Deprecated and ignored. Guild controls the operating limit."}
       }
     },

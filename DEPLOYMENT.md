@@ -306,3 +306,36 @@ destinationCA:
 Use CA certificates only. The connector needs no CA private key. Replace the
 bundle and restart the connector when the trusted roots change. With the setting
 omitted, existing HTTPS behavior is unchanged.
+
+
+## Block HTTP methods
+
+Use a connector build that supports `blocked_methods`. Set the connector-wide
+policy in `connector.json`:
+
+```json
+"blocked_methods": ["DELETE", "PATCH"]
+```
+
+For Helm, set:
+
+```yaml
+connector:
+  blockedMethods: [DELETE, PATCH]
+```
+
+The connector returns HTTP 403 before contacting any destination for a blocked
+method. The same policy applies to buffered and streamed calls. Method names are
+case-insensitive in configuration. An omitted setting or an empty list preserves
+existing behavior. Invalid method lists stop startup.
+
+When a blocklist is active, the connector also refuses requests with
+`X-HTTP-Method-Override`, `X-Method-Override`, or `X-HTTP-Method` headers. These
+headers could otherwise change the method inside the destination service.
+
+Apply the same policy to every replica. Changing the policy requires a connector
+restart. Verify that a blocked call returns 403 after upgrading the image.
+
+The policy checks the HTTP verb. It does not inspect tool names, request bodies,
+or application actions. A permitted POST can still invoke a destructive action;
+service authorization must restrict those actions.

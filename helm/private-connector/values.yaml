@@ -10,6 +10,7 @@ connector:
   id: ""
   controlPlaneUrl: ""
   destinations: {}
+  blockedMethods: []
 
 # An existing Secret, never a token value in Helm values/release history.
 # Optional mount: once enrolled, the Secret can be deleted.
