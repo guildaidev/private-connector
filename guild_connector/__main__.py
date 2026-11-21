@@ -24,6 +24,7 @@ from .identity import (
     identity_lock,
     renew_identity,
 )
+from .method_policy import parse_blocked_methods
 from .models import Destination, ProtocolError
 from .tunnel_client import TunnelClient
 
@@ -61,6 +62,7 @@ def _load_config(path: Path) -> tuple[dict, dict[str, Destination], Path]:
         or not config["destination_ca"].strip()
     ):
         raise ProtocolError("Setting destination_ca must be a non-empty CA bundle path")
+    parse_blocked_methods(config.get("blocked_methods", []))
     destinations = {}
     for index, (target_id, origin) in enumerate(config["destinations"].items(), 1):
         try:
@@ -277,6 +279,7 @@ async def _run(
         tunnel=tunnel,
         destinations=destinations,
         destination_ca=config.get("destination_ca"),
+        blocked_methods=config.get("blocked_methods", []),
     )
     logging.info("Private connector started; connecting to Guild")
     tasks = [

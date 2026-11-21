@@ -70,6 +70,15 @@ class ChartTests(unittest.TestCase):
             "keep",
         )
 
+    def test_method_policy_reaches_connector_config(self):
+        docs = self.manifests(
+            "connector.blockedMethods[0]=DELETE", "connector.blockedMethods[1]=PATCH"
+        )
+        config = json.loads(docs["ConfigMap"]["data"]["connector.json"])
+        self.assertEqual(config["blocked_methods"], ["DELETE", "PATCH"])
+        invalid = render("connector.blockedMethods[0]=not a method")
+        self.assertNotEqual(invalid.returncode, 0)
+
     def test_destination_ca_is_mounted_read_only_for_forwarding(self):
         docs = self.manifests(
             "destinationCA.existingConfigMap=private-roots",
