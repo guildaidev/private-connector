@@ -70,6 +70,30 @@ class ChartTests(unittest.TestCase):
             "keep",
         )
 
+    def test_destination_ca_is_mounted_read_only_for_forwarding(self):
+        docs = self.manifests(
+            "destinationCA.existingConfigMap=private-roots",
+            "destinationCA.key=roots.pem",
+        )
+        config = json.loads(docs["ConfigMap"]["data"]["connector.json"])
+        self.assertEqual(config["destination_ca"], "/etc/guild/destination-ca/ca.pem")
+        pod = docs["Deployment"]["spec"]["template"]["spec"]
+        mount = next(
+            m
+            for m in pod["containers"][0]["volumeMounts"]
+            if m["name"] == "destination-ca"
+        )
+        self.assertTrue(mount["readOnly"])
+        self.assertEqual(mount["mountPath"], "/etc/guild/destination-ca")
+        volume = next(v for v in pod["volumes"] if v["name"] == "destination-ca")
+        self.assertEqual(
+            volume["configMap"],
+            {
+                "name": "private-roots",
+                "items": [{"key": "roots.pem", "path": "ca.pem"}],
+            },
+        )
+
     def test_separate_tunnels_have_separate_storage_and_existing_claim_is_respected(
         self,
     ):
