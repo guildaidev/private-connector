@@ -11,6 +11,7 @@ import signal
 import ssl
 from datetime import UTC, datetime
 from getpass import getpass
+from importlib.metadata import version
 from pathlib import Path
 
 import httpx
@@ -27,6 +28,8 @@ from .identity import (
 from .method_policy import parse_blocked_methods
 from .models import Destination, ProtocolError
 from .tunnel_client import TunnelClient
+
+_VERSION = version("guild-private-connector")
 
 
 def _load_config(path: Path) -> tuple[dict, dict[str, Destination], Path]:
@@ -78,6 +81,11 @@ def _load_config(path: Path) -> tuple[dict, dict[str, Destination], Path]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {_VERSION}",
+    )
     parser.add_argument(
         "command",
         choices=["run", "enroll", "migrate-control-plane"],

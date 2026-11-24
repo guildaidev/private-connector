@@ -48,6 +48,7 @@ jobs:
       - name: Validate private connector chart and dependency lock
         run: |
           uv sync --locked
+          uv run --frozen python scripts/check-release.py
           uv run --frozen python -m unittest discover -s packaging_tests -v
       - name: Validate Compose configuration
         working-directory: deploy/compose

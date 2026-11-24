@@ -21,6 +21,22 @@ ENV = {
 
 
 class ReleaseAvailabilityTests(unittest.TestCase):
+    def test_existing_release_or_unknown_github_status_stops_publication(self):
+        for status in (200, 403, 500):
+            with self.subTest(status=status):
+                requests = []
+
+                def respond(request):
+                    requests.append(request)
+                    self.assertEqual(request.url.host, "api.github.com")
+                    return httpx.Response(status, json={})
+
+                result, _ = self.run_check(
+                    respond, ENV | {"GITHUB_REPOSITORY": "guildaidev/private-connector"}
+                )
+                self.assertEqual(result, 1)
+                self.assertEqual(len(requests), 1)
+
     def run_check(self, respond, env=ENV):
         output = io.StringIO()
         client = httpx.Client(transport=httpx.MockTransport(respond))
@@ -59,6 +75,8 @@ class ReleaseAvailabilityTests(unittest.TestCase):
                 checked = []
 
                 def respond(request):
+                    if request.url.host == "api.github.com":
+                        return httpx.Response(404, json={"message": "Not Found"})
                     if response := self.token_response(request):
                         return response
                     checked.append(request.url.path)
@@ -73,7 +91,9 @@ class ReleaseAvailabilityTests(unittest.TestCase):
                     )
                     return httpx.Response(404, json={"errors": [{"code": code}]})
 
-                status, output = self.run_check(respond)
+                status, output = self.run_check(
+                    respond, ENV | {"GITHUB_REPOSITORY": "guildaidev/private-connector"}
+                )
                 self.assertEqual(status, 1 if existing else 0, output)
                 self.assertEqual(
                     checked, [f"/v2/{repo}/manifests/0.2.0" for repo in (IMAGE, CHART)]

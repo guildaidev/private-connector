@@ -72,6 +72,23 @@ def main() -> int:
             repositories.append(reference.removeprefix("ghcr.io/"))
 
         with httpx.Client(timeout=30, follow_redirects=False) as client:
+            source_repository = os.environ.get("GITHUB_REPOSITORY")
+            if source_repository:
+                if not re.fullmatch(
+                    r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", source_repository
+                ):
+                    raise ValueError("Invalid source repository")
+                release = client.get(
+                    f"https://api.github.com/repos/{source_repository}/releases/tags/v{version}",
+                    headers={"Authorization": f"Bearer {password}"},
+                )
+                if release.status_code == 200:
+                    raise ValueError(
+                        "GitHub release already exists; choose a new version"
+                    )
+                if release.status_code != 404:
+                    release.raise_for_status()
+                    raise ValueError("Unexpected GitHub release status")
             published = [
                 f"ghcr.io/{repository}:{version}"
                 for repository in repositories

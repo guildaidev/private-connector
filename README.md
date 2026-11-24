@@ -22,15 +22,19 @@ field is required. See [Memory protection](DEPLOYMENT.md#memory-protection).
 
 1. As an account admin, open **Settings → Private connectors**.
    Create a connector for the account.
-2. Choose Docker or Helm. Enter Guild's released image digest and your internal
-   service addresses. Download the deployment file. This file has no expiry.
+2. Download `connector.json`. The destination fields are an optional helper for
+   the initial file. Start with one service or edit the file on your host later;
+   you do not need a full inventory of services or API endpoints.
 3. Create and download the enrollment token separately. New tokens last three
    days. Keep the token out of Git, deployment files, and Helm values.
-4. Follow the host commands on the setup page. Startup enrolls automatically, saves
+4. Download the Compose bundle or Helm chart from
+   [Releases](https://github.com/guildaidev/private-connector/releases/latest).
+   Follow the attached `INSTALL.md`. No repository checkout or source build is
+   required. Add at least one destination before startup. Startup enrolls, saves
    the identity, and opens the tunnel. See [Deployment](DEPLOYMENT.md) for details.
 5. Connect the integration's credentials in Guild. Open the credential's detail
    page and select **Network access → Private connector**. Choose the connector
-   and enter a target name from the customer configuration, such as `foo`.
+   and select a target name reported by the connector, such as `foo`.
 
 Example configuration; use the control-plane URL and connector ID from the app:
 
@@ -59,7 +63,7 @@ Pending or expired enrollments still count until revoked. Enroll each replica
 separately. Give each replica a private, persistent identity directory; never
 share or clone that directory. Its saved token is a bearer credential.
 
-For a source checkout, run `uv sync --locked` in the repository root.
+For development from a source checkout, run `uv sync --locked` in the repository root.
 Start with the command below. Keep the token file private. Remove
 the token file after successful enrollment; keep the identity directory.
 
