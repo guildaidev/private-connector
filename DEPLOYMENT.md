@@ -269,3 +269,40 @@ acknowledging the call or contacting the local service. Existing calls keep thei
 reservations and continue. Heartbeats, credentials renewal, target discovery,
 stream credits, and cancellation remain available. Reservations are released
 when their task ends. New calls resume automatically when capacity is available.
+
+
+## Private CA for internal HTTPS services
+
+Set `destination_ca` in `connector.json` to the path of a PEM CA bundle:
+
+```json
+"destination_ca": "/etc/guild/destination-ca/ca.pem"
+```
+
+The bundle adds trusted CA certificates for HTTPS destinations. The connector
+still checks certificate chains and hostnames. Keep the service hostname in the
+destination URL. This setting does not configure client certificates or change
+trust for enrollment and the Guild gateway.
+
+For Docker Compose, mount the bundle read-only in the connector service:
+
+```yaml
+volumes:
+  - ./internal-ca.pem:/etc/guild/destination-ca/ca.pem:ro
+```
+
+For Helm, create a ConfigMap containing the CA bundle and set these values:
+
+```sh
+kubectl create configmap internal-api-ca --from-file=ca.pem=./internal-ca.pem
+```
+
+```yaml
+destinationCA:
+  existingConfigMap: internal-api-ca
+  key: ca.pem
+```
+
+Use CA certificates only. The connector needs no CA private key. Replace the
+bundle and restart the connector when the trusted roots change. With the setting
+omitted, existing HTTPS behavior is unchanged.

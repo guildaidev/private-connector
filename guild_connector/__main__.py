@@ -56,6 +56,11 @@ def _load_config(path: Path) -> tuple[dict, dict[str, Destination], Path]:
             raise ProtocolError(f"Setting {field} must be a non-empty string")
     if not isinstance(config["destinations"], dict) or not config["destinations"]:
         raise ProtocolError("Setting destinations must be a non-empty JSON object")
+    if "destination_ca" in config and (
+        not isinstance(config["destination_ca"], str)
+        or not config["destination_ca"].strip()
+    ):
+        raise ProtocolError("Setting destination_ca must be a non-empty CA bundle path")
     destinations = {}
     for index, (target_id, origin) in enumerate(config["destinations"].items(), 1):
         try:
@@ -271,6 +276,7 @@ async def _run(
     connector = PrivateConnector(
         tunnel=tunnel,
         destinations=destinations,
+        destination_ca=config.get("destination_ca"),
     )
     logging.info("Private connector started; connecting to Guild")
     tasks = [

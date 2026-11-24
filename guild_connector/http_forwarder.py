@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import ssl
 from base64 import b64encode
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
@@ -30,9 +31,14 @@ class _RejectCookies(DefaultCookiePolicy):
 
 
 class HttpForwarder:
-    def __init__(self) -> None:
+    def __init__(self, *, ca_file: str | None = None) -> None:
+        verify: bool | ssl.SSLContext = True
+        if ca_file is not None:
+            verify = ssl.create_default_context()
+            verify.load_verify_locations(cafile=ca_file)
         self._client = httpx.AsyncClient(
             limits=httpx.Limits(max_connections=MAX_IN_FLIGHT),
+            verify=verify,
             trust_env=False,
             follow_redirects=False,
             timeout=None,

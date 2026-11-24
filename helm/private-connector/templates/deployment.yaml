@@ -87,6 +87,11 @@ spec:
             timeoutSeconds: 5
             failureThreshold: 2
           volumeMounts:
+            {{- if .Values.destinationCA.existingConfigMap }}
+            - name: destination-ca
+              mountPath: /etc/guild/destination-ca
+              readOnly: true
+            {{- end }}
             {{- if .Values.gatewayCA.existingConfigMap }}
             - name: gateway-ca
               mountPath: /etc/guild/gateway-ca
@@ -105,6 +110,14 @@ spec:
               readOnly: true
             {{- end }}
       volumes:
+        {{- if .Values.destinationCA.existingConfigMap }}
+        - name: destination-ca
+          configMap:
+            name: {{ .Values.destinationCA.existingConfigMap }}
+            items:
+              - key: {{ .Values.destinationCA.key }}
+                path: ca.pem
+        {{- end }}
         {{- if .Values.gatewayCA.existingConfigMap }}
         - name: gateway-ca
           configMap:
