@@ -2,10 +2,12 @@
 
 import argparse
 import hashlib
-import io
 import json
 import re
+import shutil
+import subprocess
 import tarfile
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -52,22 +54,50 @@ def build_assets(
     (output / "VERSION").write_text(f"{version}\n")
     chart_name = f"private-connector-{version}.tgz"
     chart_root = root / "helm/private-connector"
+    if (root / "helm").is_symlink() or chart_root.is_symlink():
+        raise ValueError("Chart packaging does not accept symbolic links")
     chart = yaml.safe_load((chart_root / "Chart.yaml").read_text())
     if chart["version"] != version or chart["appVersion"] != version:
         raise ValueError("The chart and connector versions must match")
-    with tarfile.open(output / chart_name, "w:gz") as archive:
-        for path in sorted(chart_root.rglob("*")):
-            if not path.is_file():
-                continue
-            contents = path.read_bytes()
-            if path.name == "values.yaml":
-                chart_values = yaml.safe_load(contents)
+    chart_files = []
+    for path in sorted(chart_root.rglob("*")):
+        if path.is_symlink():
+            raise ValueError("Chart packaging does not accept symbolic links")
+        if not path.is_file():
+            continue
+        relative = path.relative_to(chart_root)
+        if str(relative) not in {
+            "Chart.yaml",
+            "values.yaml",
+            "values.schema.json",
+            "README.md",
+            "LICENSE",
+            ".helmignore",
+        } and not (
+            relative.parts[0] == "templates"
+            and path.suffix in {".yaml", ".yml", ".tpl", ".txt"}
+        ):
+            raise ValueError(
+                "Unexpected chart file; remove local configuration before packaging"
+            )
+        chart_files.append(path)
+    with tempfile.TemporaryDirectory(prefix="private-connector-chart-") as temporary:
+        staged_chart = Path(temporary) / "private-connector"
+        for path in chart_files:
+            staged_file = staged_chart / path.relative_to(chart_root)
+            staged_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(path, staged_file)
+            if path == chart_root / "values.yaml":
+                chart_values = yaml.safe_load(path.read_text())
                 chart_values["image"].update(repository=image, digest=digest)
-                contents = yaml.safe_dump(chart_values, sort_keys=False).encode()
-            info = tarfile.TarInfo(f"private-connector/{path.relative_to(chart_root)}")
-            info.size = len(contents)
-            info.mode = 0o644
-            archive.addfile(info, io.BytesIO(contents))
+                staged_file.write_text(yaml.safe_dump(chart_values, sort_keys=False))
+        subprocess.run(
+            ["helm", "package", str(staged_chart), "--destination", str(output)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
     (output / "release.json").write_text(
         json.dumps(
             {

@@ -8,7 +8,7 @@ not use a client certificate.
 
 1. An account administrator creates a connector in Guild and downloads an
    enrollment token. A new token expires after three days and reserves one of
-   the account's four tunnel slots. Prepare the deployment files before creating
+   the connector's four tunnel slots. Prepare the deployment files before creating
    the token if you need more setup time; those files do not expire.
 2. Give each installation its own token and persistent identity directory. Keep
    the token in a private file. Do not put it in Git, a container image, a

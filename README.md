@@ -2,7 +2,7 @@
 
 The connector runs in the customer's network. It opens an outbound WSS connection
 to Guild and forwards HTTP requests to configured local services. The connector
-does not run agents, LLM calls, or a secret store.
+does not run agents or resolve integration credentials.
 
 Guild keeps integration code, credential resolution, and access checks.
 Integration credentials pass through the tunnel in request headers or bodies.
@@ -84,7 +84,8 @@ To block HTTP verbs such as DELETE at the connector, configure
   credential selects a private route. Raw SQL/TCP and direct SDK connections
   cannot use the HTTP tunnel. The generic HTTP tool supports `fetch`, not
   background `fetch_async`.
-- OAuth token exchange and LLM calls stay hosted.
+- Guild handles OAuth flows and LLM orchestration. The connector can carry their
+  HTTP traffic to configured internal services.
 - No redirects, environment proxies, or cookies retained between requests.
   Target names cannot override the customer's configured host.
 - Ordinary responses are buffered. Guild can request streamed responses,

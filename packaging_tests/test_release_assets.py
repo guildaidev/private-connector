@@ -1,5 +1,6 @@
 import hashlib
 import json
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -88,3 +89,25 @@ class ReleaseAssetsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "SHA-256"):
             build_assets(ROOT, self.output, IMAGE, "latest", "b" * 40)
         self.assertFalse(self.output.exists())
+
+    def test_chart_packaging_refuses_local_credentials_and_symbolic_links(self):
+        source = self.output.parent / "source"
+        source.mkdir()
+        for name in ("pyproject.toml", "LICENSE"):
+            shutil.copyfile(ROOT / name, source / name)
+        for name in ("deploy", "helm"):
+            shutil.copytree(ROOT / name, source / name)
+        private_file = source / "helm/private-connector/identity.json"
+        private_file.write_text('{"connector_token": "local-test-identity"}')
+        with self.assertRaisesRegex(ValueError, "Unexpected chart file"):
+            build_assets(source, self.output, IMAGE, DIGEST, "b" * 40)
+        private_file.unlink()
+        private_file = source / "identity.json"
+        private_file.write_text('{"connector_token": "local-test-identity"}')
+        (source / "helm/private-connector/templates/identity.yaml").symlink_to(
+            private_file
+        )
+        with self.assertRaisesRegex(ValueError, "symbolic links"):
+            build_assets(
+                source, self.output.parent / "other-output", IMAGE, DIGEST, "b" * 40
+            )
