@@ -5,13 +5,14 @@ from __future__ import annotations
 import re
 import ssl
 from base64 import b64encode
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from datetime import UTC, datetime
 from http.cookiejar import Cookie, CookieJar, DefaultCookiePolicy
 from urllib.request import Request
 
 import httpx
 
+from .method_policy import parse_blocked_methods
 from .models import Delivery, Destination, ProxyResponse
 from .protocol import (
     MAX_IN_FLIGHT,
@@ -31,7 +32,10 @@ class _RejectCookies(DefaultCookiePolicy):
 
 
 class HttpForwarder:
-    def __init__(self, *, ca_file: str | None = None) -> None:
+    def __init__(
+        self, *, ca_file: str | None = None, blocked_methods: Sequence[str] = ()
+    ) -> None:
+        self._blocked_methods = parse_blocked_methods(blocked_methods)
         verify: bool | ssl.SSLContext = True
         if ca_file is not None:
             verify = ssl.create_default_context()
@@ -87,11 +91,26 @@ class HttpForwarder:
     ) -> AsyncGenerator[dict[str, object], None]:
         prepared = self._prepare(destination, delivery)
         if isinstance(prepared, ProxyResponse):
-            yield {
-                "type": "error",
-                "id": delivery.id,
-                "error_code": prepared.error_code or "local_forward_error",
-            }
+            if prepared.error_code:
+                yield {
+                    "type": "error",
+                    "id": delivery.id,
+                    "error_code": prepared.error_code,
+                }
+            else:
+                yield {
+                    "type": "response_start",
+                    "id": delivery.id,
+                    "response_status": prepared.status,
+                    "response_headers": prepared.headers,
+                }
+                if prepared.body:
+                    yield {
+                        "type": "response_chunk",
+                        "id": delivery.id,
+                        "response_body_base64": b64encode(prepared.body).decode(),
+                    }
+                yield {"type": "response_end", "id": delivery.id}
             return
         url, headers = prepared
         async with self._client.stream(
@@ -153,6 +172,21 @@ class HttpForwarder:
             or delivery.method == "CONNECT"
         ):
             return ProxyResponse(delivery.id, 502, {}, b"", "invalid_request")
+        override_headers = {
+            "x-http-method-override",
+            "x-method-override",
+            "x-http-method",
+        }
+        if delivery.method in self._blocked_methods or (
+            self._blocked_methods
+            and any(name.lower() in override_headers for name in delivery.headers)
+        ):
+            return ProxyResponse(
+                delivery.id,
+                403,
+                {"Content-Type": "text/plain; charset=utf-8"},
+                b"Request blocked by the connector HTTP method policy.",
+            )
         hop_headers = {
             "connection",
             "keep-alive",
