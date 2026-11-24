@@ -231,3 +231,41 @@ Guild's source or backend image.
 GitHub packages may initially be private; the workflow does not make the source
 repository or packages public. Use new versions for releases and security fixes.
 Publication is not deployment and does not imply production sign-off.
+
+## Concurrency
+
+Each tunnel has a fixed safety ceiling of 64 concurrent requests. Guild controls
+the operating limit within that ceiling. A lower operating limit lets active
+calls finish before admitting more calls. Routine changes require no restart.
+
+Before upgrading a connector with a custom concurrency setting, ask Guild to set
+the intended operating limit. Legacy JSON `max_in_flight` and Helm
+`connector.maxInFlight` values are accepted but ignored.
+
+## Memory protection
+
+The connector reads Linux cgroup v2 or v1 memory limits and usage, including
+visible parent constraints. With no finite cgroup limit, the working limit is
+capped at 512 MiB and bounded by host memory and available memory. If current
+usage cannot be read, the connector refuses new work until readings recover.
+
+Admission leaves 25% of the working limit, with a minimum of 32 MiB, as runtime
+headroom. Another 64 MiB covers transport receive/parsing and control buffers.
+The WebSocket receive queue holds one frame. Each admitted call reserves its
+working memory until completion, cancellation, or disconnect:
+
+- A buffered call reserves 64 MiB for the largest supported response and its
+  byte-array, base64, JSON, and socket copies.
+- A streaming call reserves 1 MiB for bounded chunks and encoding buffers.
+- Both reserve another four times the incoming frame length for the decoded
+  request and retained metadata.
+
+The conservative reservations can admit fewer buffered calls than Guild’s
+operating limit permits. The connector never increases its budget merely
+because the host has more memory than the container was allocated.
+
+When a reservation cannot fit, the connector returns `connector_busy` without
+acknowledging the call or contacting the local service. Existing calls keep their
+reservations and continue. Heartbeats, credentials renewal, target discovery,
+stream credits, and cancellation remain available. Reservations are released
+when their task ends. New calls resume automatically when capacity is available.

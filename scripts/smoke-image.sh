@@ -61,5 +61,25 @@ with identity_lock(directory):
 assert (directory / "identity.json").read_bytes() == before
 print("PASS: non-root, read-only image; private identity survives container replacement")
 '
+"$engine" run "${flags[@]}" --network=none --memory=256m --memory-swap=256m \
+    --entrypoint python "$image" -c '
+from guild_connector.memory import MemoryBudget, MemoryReader
+mib = 1024 * 1024
+reader = MemoryReader()
+assert reader.snapshot().limit == 256 * mib, reader.snapshot()
+budget = MemoryBudget(reader.snapshot)
+active = budget.reserve_call(100, streaming=True)
+assert active is not None
+pressure = bytearray(128 * mib)
+for offset in range(0, len(pressure), 4096):
+    pressure[offset] = 1
+assert budget.reserve_call(100, streaming=True) is None
+del pressure
+active.release()
+resumed = budget.reserve_call(100, streaming=True)
+assert resumed is not None
+resumed.release()
+print("PASS: Linux container limit detected; memory pressure refuses new work and recovers")
+'
 "$engine" run "${flags[@]}" --mount "type=bind,source=$connector_root/tests,target=/tests,readonly" \
     --entrypoint python "$image" -m unittest discover -s /tests -v

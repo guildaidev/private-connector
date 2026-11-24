@@ -19,6 +19,7 @@ from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
 
 from guild_connector.connector import PrivateConnector
+from guild_connector.memory import MemoryBudget, MemorySnapshot
 from guild_connector.models import Destination, ProtocolError
 from guild_connector.tunnel_client import TunnelClient
 
@@ -91,6 +92,13 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                 except (BrokenPipeError, ConnectionResetError):
                     pass
 
+            def do_POST(self):
+                requests.append(self.path)
+                self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                self.send_response(201)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
             def log_message(self, format, *args):
                 pass
 
@@ -121,16 +129,19 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
         }
 
     def connector(
-        self, port, max_in_flight=2, ca_file=None, rotated=None, credential=None
+        self, port, ca_file=None, rotated=None, credential=None, memory_budget=None
     ):
         return PrivateConnector(
             tunnel=TunnelClient(
                 base_url=f"https://127.0.0.1:{port}",
                 ca_file=ca_file or str(self.cert),
                 credential=credential or self.credential,
-                max_in_flight=max_in_flight,
                 rotated=rotated,
                 target_names=("local",),
+                memory_budget=memory_budget
+                or MemoryBudget(
+                    lambda: MemorySnapshot(512 * 1024 * 1024, 512 * 1024 * 1024)
+                ),
             ),
             destinations={
                 "local": Destination(
@@ -590,23 +601,34 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                         credential=self.credential,
                     )
 
-    def test_requested_capacity_requires_positive_integer(self):
-        for requested in (0, -1, True, 1.5, "128"):
-            with self.subTest(requested=requested):
-                with self.assertRaisesRegex(ProtocolError, "positive integer"):
-                    TunnelClient(
-                        base_url="https://gateway.test",
-                        ca_file=str(self.cert),
-                        credential=self.credential,
-                        max_in_flight=requested,
-                    )
+    async def test_gateway_cannot_raise_fixed_safety_ceiling(self):
+        async def handler(socket):
+            await socket.recv()
+            await socket.send(
+                json.dumps(
+                    {
+                        "type": "ready",
+                        "protocol_version": 5,
+                        "max_in_flight": 4097,
+                    }
+                )
+            )
+            await socket.wait_closed()
+
+        async with serve(
+            handler, "127.0.0.1", 0, ssl=self.tls, subprotocols=["guild-tunnel-v5"]
+        ) as server:
+            connector = self.connector(server.sockets[0].getsockname()[1])
+            with self.assertRaisesRegex(ProtocolError, "handshake"):
+                await asyncio.wait_for(connector.run_forever(asyncio.Event()), 3)
+        self.assertEqual(self.requests, [])
 
     async def test_client_uses_negotiated_lower_capacity(self):
         slow, fast = self.request("/slow"), self.request("/fast")
 
         async def handler(socket):
             hello = json.loads(await socket.recv())
-            self.assertEqual(hello["max_in_flight"], 128)
+            self.assertEqual(hello["max_in_flight"], 4096)
             await socket.send(
                 json.dumps({"type": "ready", "protocol_version": 5, "max_in_flight": 1})
             )
@@ -620,9 +642,7 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
             handler, "127.0.0.1", 0, ssl=self.tls, subprotocols=["guild-tunnel-v5"]
         ) as server:
             try:
-                connector = self.connector(
-                    server.sockets[0].getsockname()[1], max_in_flight=128
-                )
+                connector = self.connector(server.sockets[0].getsockname()[1])
                 with self.assertRaisesRegex(
                     ProtocolError, "exceeded negotiated request capacity"
                 ):
@@ -731,7 +751,8 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                 )
                 hello = json.loads(await socket.recv())
                 self.assertEqual(
-                    hello, {"type": "hello", "protocol_version": 5, "max_in_flight": 2}
+                    hello,
+                    {"type": "hello", "protocol_version": 5, "max_in_flight": 4096},
                 )
                 await socket.send(
                     json.dumps(
@@ -932,9 +953,7 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
             handler, "127.0.0.1", 0, ssl=self.tls, subprotocols=["guild-tunnel-v5"]
         ) as server:
             task = asyncio.create_task(
-                self.connector(
-                    server.sockets[0].getsockname()[1], max_in_flight=1
-                ).run_forever(stop)
+                self.connector(server.sockets[0].getsockname()[1]).run_forever(stop)
             )
             try:
                 await asyncio.wait_for(finished, 5)
@@ -1215,3 +1234,152 @@ class TunnelTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.wait_for(connector.run_forever(asyncio.Event()), 3)
             self.assertEqual(connections, [])
             self.assertEqual(self.requests, [])
+
+    async def test_memory_pressure_rejects_new_call_and_preserves_active_stream(self):
+        mib = 1024 * 1024
+        snapshot = MemorySnapshot(256 * mib, 256 * mib)
+        budget = MemoryBudget(lambda: snapshot)
+        stop = asyncio.Event()
+        finished = asyncio.get_running_loop().create_future()
+        connections = 0
+        streamed = self.request("/stream") | {"stream_response": True}
+        denied = self.request("/must-not-run") | {"method": "POST"}
+        admitted = self.request("/after-pressure") | {"method": "POST"}
+
+        async def handler(socket):
+            nonlocal snapshot, connections
+            connections += 1
+            try:
+                await socket.recv()
+                await socket.send(
+                    json.dumps(
+                        {"type": "ready", "protocol_version": 5, "max_in_flight": 64}
+                    )
+                )
+                await socket.send(json.dumps(streamed))
+                self.assertEqual(
+                    json.loads(await socket.recv()),
+                    {"type": "ack", "id": streamed["id"]},
+                )
+                self.assertEqual(
+                    json.loads(await socket.recv())["type"], "response_start"
+                )
+                first = json.loads(await socket.recv())
+                self.assertEqual(
+                    b64decode(first["response_body_base64"]), b"data: first\n\n"
+                )
+                snapshot = MemorySnapshot(256 * mib, 0)
+                await socket.send(json.dumps(denied))
+                self.assertEqual(
+                    json.loads(await socket.recv()),
+                    {
+                        "type": "error",
+                        "id": denied["id"],
+                        "error_code": "connector_busy",
+                    },
+                )
+                await socket.send(json.dumps({"type": "ping", "nonce": "still-live"}))
+                self.assertEqual(
+                    json.loads(await socket.recv()),
+                    {"type": "pong", "nonce": "still-live"},
+                )
+                query_id = str(uuid4())
+                await socket.send(json.dumps({"type": "list_targets", "id": query_id}))
+                self.assertEqual(
+                    json.loads(await socket.recv()),
+                    {"type": "targets", "id": query_id, "names": ["local"]},
+                )
+                self.assertEqual(self.requests, ["/stream"])
+                snapshot = MemorySnapshot(256 * mib, 256 * mib)
+                await socket.send(json.dumps(admitted))
+                self.assertEqual(
+                    json.loads(await socket.recv()),
+                    {"type": "ack", "id": admitted["id"]},
+                )
+                self.assertEqual(
+                    json.loads(await socket.recv())["response_status"], 201
+                )
+                self.release_slow.set()
+                last = json.loads(await socket.recv())
+                self.assertEqual(
+                    b64decode(last["response_body_base64"]), b"data: second\n\n"
+                )
+                self.assertEqual(
+                    json.loads(await socket.recv()),
+                    {"type": "response_end", "id": streamed["id"]},
+                )
+                await socket.send(json.dumps({"type": "ping", "nonce": "finished"}))
+                self.assertEqual(json.loads(await socket.recv())["type"], "pong")
+                finished.set_result(None)
+                await stop.wait()
+            except Exception as error:
+                if not finished.done():
+                    finished.set_exception(error)
+
+        async with serve(
+            handler, "127.0.0.1", 0, ssl=self.tls, subprotocols=["guild-tunnel-v5"]
+        ) as server:
+            connector = self.connector(
+                server.sockets[0].getsockname()[1], memory_budget=budget
+            )
+            running = asyncio.create_task(connector.run_forever(stop))
+            try:
+                await asyncio.wait_for(finished, 4)
+                self.assertEqual(self.requests, ["/stream", "/after-pressure"])
+                self.assertEqual(connections, 1)
+            finally:
+                self.release_slow.set()
+                stop.set()
+                await asyncio.wait_for(running, 3)
+        self.assertIsNotNone(budget.reserve(128 * mib))
+
+    async def test_cancelled_stream_releases_memory_for_the_next_call(self):
+        mib = 1024 * 1024
+        budget = MemoryBudget(lambda: MemorySnapshot(256 * mib, 256 * mib))
+        # Leave room for one stream and its request, then fill the remaining budget.
+        held = budget.reserve(126 * mib)
+        stop = asyncio.Event()
+        finished = asyncio.get_running_loop().create_future()
+        request = self.request("/stream") | {"stream_response": True}
+        next_request = self.request("/stream") | {"stream_response": True}
+
+        async def handler(socket):
+            try:
+                await socket.recv()
+                await socket.send(
+                    json.dumps(
+                        {"type": "ready", "protocol_version": 5, "max_in_flight": 64}
+                    )
+                )
+                await socket.send(json.dumps(request))
+                for kind in ("ack", "response_start", "response_chunk"):
+                    self.assertEqual(json.loads(await socket.recv())["type"], kind)
+                await socket.send(json.dumps({"type": "cancel", "id": request["id"]}))
+                await socket.send(json.dumps({"type": "ping", "nonce": "cancelled"}))
+                self.assertEqual(json.loads(await socket.recv())["type"], "pong")
+                await socket.send(json.dumps(next_request))
+                self.assertEqual(
+                    json.loads(await socket.recv()),
+                    {"type": "ack", "id": next_request["id"]},
+                )
+                finished.set_result(None)
+                await stop.wait()
+            except Exception as error:
+                if not finished.done():
+                    finished.set_exception(error)
+
+        async with serve(
+            handler, "127.0.0.1", 0, ssl=self.tls, subprotocols=["guild-tunnel-v5"]
+        ) as server:
+            connector = self.connector(
+                server.sockets[0].getsockname()[1], memory_budget=budget
+            )
+            running = asyncio.create_task(connector.run_forever(stop))
+            try:
+                await asyncio.wait_for(finished, 4)
+            finally:
+                self.release_slow.set()
+                stop.set()
+                await asyncio.wait_for(running, 3)
+        held.release()
+        self.assertIsNotNone(budget.reserve(128 * mib))

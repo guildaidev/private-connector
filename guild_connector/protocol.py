@@ -5,6 +5,7 @@ from base64 import b64encode
 
 from .models import ProxyResponse
 
+MAX_IN_FLIGHT = 4096
 MAX_FRAME_BYTES = 16 * 1024 * 1024
 MAX_HEADER_BYTES = 128 * 1024
 MAX_HEADER_COUNT = 256

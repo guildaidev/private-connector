@@ -7,7 +7,8 @@ import json
 import logging
 import random
 import ssl
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
+from contextlib import aclosing
 from datetime import UTC, datetime, timedelta
 from unicodedata import category
 from urllib.parse import urlsplit, urlunsplit
@@ -16,8 +17,9 @@ from uuid import UUID
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketException
 
+from .memory import MemoryBudget, MemoryReservation
 from .models import Delivery, ProtocolError, ProxyResponse
-from .protocol import MAX_FRAME_BYTES, STREAM_WINDOW, encode_response
+from .protocol import MAX_FRAME_BYTES, MAX_IN_FLIGHT, STREAM_WINDOW, encode_response
 
 log = logging.getLogger(__name__)
 DISCOVERY_SUBPROTOCOL = "guild-tunnel-v5"
@@ -36,10 +38,10 @@ class TunnelClient:
         base_url: str,
         credential: Callable[[], tuple[str, datetime]],
         ca_file: str | None = None,
-        max_in_flight: int = 16,
         rotated: asyncio.Event | None = None,
         refresh_requested: asyncio.Event | None = None,
         target_names: tuple[str, ...] = (),
+        memory_budget: MemoryBudget | None = None,
     ):
         parsed = urlsplit(base_url)
         if (
@@ -54,8 +56,6 @@ class TunnelClient:
                 "Gateway URL must use HTTPS/WSS, include a hostname, "
                 "and have no credentials, fragment, or control characters"
             )
-        if type(max_in_flight) is not int or max_in_flight < 1:
-            raise ProtocolError("max_in_flight must be a positive integer")
         self._url = urlunsplit(
             (
                 "wss",
@@ -69,15 +69,15 @@ class TunnelClient:
         self._rotated = rotated
         self._refresh_requested = refresh_requested
         self._credential = credential
-        self._max_in_flight = max_in_flight
         self._target_names = target_names
+        self._memory = memory_budget or MemoryBudget()
         self.connected = False
 
     async def run(
         self,
         forward: Callable[[Delivery], Awaitable[ProxyResponse]],
         stop: asyncio.Event,
-        stream_forward: Callable[[Delivery], AsyncIterator[dict[str, object]]]
+        stream_forward: Callable[[Delivery], AsyncGenerator[dict[str, object], None]]
         | None = None,
     ) -> None:
         retry_seconds = 1
@@ -106,6 +106,7 @@ class TunnelClient:
                     ping_interval=20,
                     ping_timeout=20,
                     max_size=MAX_FRAME_BYTES,
+                    max_queue=1,
                 ) as socket:
                     try:
                         await self._serve(
@@ -181,7 +182,8 @@ class TunnelClient:
         forward: Callable[[Delivery], Awaitable[ProxyResponse]],
         stop: asyncio.Event,
         expires_at: datetime,
-        stream_forward: Callable[[Delivery], AsyncIterator[dict[str, object]]] | None,
+        stream_forward: Callable[[Delivery], AsyncGenerator[dict[str, object], None]]
+        | None,
     ) -> None:
         version = 5 if socket.subprotocol == DISCOVERY_SUBPROTOCOL else 4
         await socket.send(
@@ -189,7 +191,7 @@ class TunnelClient:
                 {
                     "type": "hello",
                     "protocol_version": version,
-                    "max_in_flight": self._max_in_flight,
+                    "max_in_flight": MAX_IN_FLIGHT,
                 }
             )
         )
@@ -199,7 +201,7 @@ class TunnelClient:
             or type(ready.get("protocol_version")) is not int
             or ready.get("protocol_version") != version
             or type(ready.get("max_in_flight")) is not int
-            or not 1 <= ready["max_in_flight"] <= self._max_in_flight
+            or not 1 <= ready["max_in_flight"] <= MAX_IN_FLIGHT
         ):
             raise ProtocolError("Invalid Guild tunnel gateway connection handshake")
         capacity = ready["max_in_flight"]
@@ -221,121 +223,151 @@ class TunnelClient:
             if delivery.stream_response:
                 if stream_forward is None:
                     raise ProtocolError("Streaming forwarder is not configured")
-                async for frame in stream_forward(delivery):
-                    if frame["type"] == "response_chunk":
-                        await credits[delivery.id].acquire()
-                    await socket.send(json.dumps(frame))
+                async with aclosing(stream_forward(delivery)) as frames:
+                    async for frame in frames:
+                        if frame["type"] == "response_chunk":
+                            await credits[delivery.id].acquire()
+                        await socket.send(json.dumps(frame))
             else:
                 result = await forward(delivery)
                 await socket.send(encode_response(result))
 
-        def finished(request_id: str, task: asyncio.Task[None]) -> None:
+        def finished(
+            request_id: str, reservation: MemoryReservation, task: asyncio.Task[None]
+        ) -> None:
+            reservation.release()
             active.pop(request_id, None)
             credits.pop(request_id, None)
             if not task.cancelled() and (error := task.exception()) is not None:
                 if not failed.done():
                     failed.set_exception(error)
 
-        async def receive() -> None:
+        async def receive_frame(frame: dict[str, object], frame_size: int) -> None:
             nonlocal expires_at
-            async for data in socket:
-                frame = _parse_frame(data)
-                kind = frame.get("type")
-                if kind == "authenticated":
-                    try:
-                        acknowledged_expiry = datetime.fromisoformat(
-                            str(frame.get("expires_at"))
-                        )
-                    except ValueError:
-                        raise ProtocolError(
-                            "Invalid authentication acknowledgement"
-                        ) from None
-                    if pending_expiry is None or acknowledged_expiry != pending_expiry:
-                        raise ProtocolError("Unexpected authentication acknowledgement")
-                    expires_at = pending_expiry
-                    authenticated.set()
-                    expiry_changed.set()
-                elif kind == "ping":
-                    nonce = frame.get("nonce")
-                    if not isinstance(nonce, str) or len(nonce) > 128:
-                        raise ProtocolError("Invalid heartbeat")
-                    await socket.send(json.dumps({"type": "pong", "nonce": nonce}))
-                elif kind == "list_targets":
-                    if expires_at <= datetime.now(UTC):
-                        raise TimeoutError("Tunnel authorization expired")
-                    if version < 5:
-                        raise ProtocolError(
-                            "Unexpected Guild tunnel gateway frame type"
-                        )
-                    try:
-                        request_id = str(UUID(str(frame.get("id"))))
-                    except ValueError as error:
-                        raise ProtocolError("Invalid target list request ID") from error
+            kind = frame.get("type")
+            if kind == "authenticated":
+                try:
+                    acknowledged_expiry = datetime.fromisoformat(
+                        str(frame.get("expires_at"))
+                    )
+                except ValueError:
+                    raise ProtocolError(
+                        "Invalid authentication acknowledgement"
+                    ) from None
+                if pending_expiry is None or acknowledged_expiry != pending_expiry:
+                    raise ProtocolError("Unexpected authentication acknowledgement")
+                expires_at = pending_expiry
+                authenticated.set()
+                expiry_changed.set()
+            elif kind == "ping":
+                nonce = frame.get("nonce")
+                if not isinstance(nonce, str) or len(nonce) > 128:
+                    raise ProtocolError("Invalid heartbeat")
+                await socket.send(json.dumps({"type": "pong", "nonce": nonce}))
+            elif kind == "list_targets":
+                if expires_at <= datetime.now(UTC):
+                    raise TimeoutError("Tunnel authorization expired")
+                if version < 5:
+                    raise ProtocolError("Unexpected Guild tunnel gateway frame type")
+                try:
+                    request_id = str(UUID(str(frame.get("id"))))
+                except ValueError as error:
+                    raise ProtocolError("Invalid target list request ID") from error
+                response = json.dumps(
+                    {
+                        "type": "targets",
+                        "id": request_id,
+                        "names": self._target_names,
+                    }
+                )
+                target_count = len(self._target_names)
+                encoded_size = len(response.encode())
+                if target_count > 2048 or encoded_size > 4 * 1024 * 1024:
+                    log.warning(
+                        "Target discovery unavailable: %d targets, "
+                        "encoded response %d bytes (limits: 2048 targets, "
+                        "4194304 bytes)",
+                        target_count,
+                        encoded_size,
+                    )
                     response = json.dumps(
                         {
-                            "type": "targets",
+                            "type": "error",
                             "id": request_id,
-                            "names": self._target_names,
+                            "error_code": "targets_unavailable",
                         }
                     )
-                    target_count = len(self._target_names)
-                    encoded_size = len(response.encode())
-                    if target_count > 2048 or encoded_size > 4 * 1024 * 1024:
-                        log.warning(
-                            "Target discovery unavailable: %d targets, "
-                            "encoded response %d bytes (limits: 2048 targets, "
-                            "4194304 bytes)",
-                            target_count,
-                            encoded_size,
-                        )
-                        response = json.dumps(
+                await socket.send(response)
+            elif kind == "cancel":
+                try:
+                    request_id = str(UUID(str(frame.get("id"))))
+                except ValueError as error:
+                    raise ProtocolError("Invalid cancellation request ID") from error
+                if task := active.get(request_id):
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+            elif kind == "credit":
+                try:
+                    request_id = str(UUID(str(frame.get("id"))))
+                except ValueError as error:
+                    raise ProtocolError("Invalid stream credit ID") from error
+                if frame.get("chunks") != 1:
+                    raise ProtocolError("Invalid stream credit")
+                if credit := credits.get(request_id):
+                    try:
+                        credit.release()
+                    except ValueError as error:
+                        raise ProtocolError("Excess stream credit") from error
+            elif kind == "request":
+                if expires_at <= datetime.now(UTC):
+                    raise TimeoutError("Tunnel authorization expired")
+                try:
+                    request_id = str(UUID(str(frame.get("id"))))
+                except ValueError as error:
+                    raise ProtocolError("Invalid delivery request ID") from error
+                active_count = sum(not task.done() for task in active.values())
+                if request_id in active or active_count >= capacity:
+                    raise ProtocolError(
+                        "Guild tunnel gateway exceeded negotiated request capacity"
+                    )
+                reservation = self._memory.reserve_call(
+                    frame_size, streaming=frame.get("stream_response") is True
+                )
+                if reservation is None:
+                    await socket.send(
+                        json.dumps(
                             {
                                 "type": "error",
                                 "id": request_id,
-                                "error_code": "targets_unavailable",
+                                "error_code": "connector_busy",
                             }
                         )
-                    await socket.send(response)
-                elif kind == "cancel":
-                    try:
-                        request_id = str(UUID(str(frame.get("id"))))
-                    except ValueError as error:
-                        raise ProtocolError(
-                            "Invalid cancellation request ID"
-                        ) from error
-                    if task := active.get(request_id):
-                        task.cancel()
-                        await asyncio.gather(task, return_exceptions=True)
-                elif kind == "credit":
-                    try:
-                        request_id = str(UUID(str(frame.get("id"))))
-                    except ValueError as error:
-                        raise ProtocolError("Invalid stream credit ID") from error
-                    if frame.get("chunks") != 1:
-                        raise ProtocolError("Invalid stream credit")
-                    if credit := credits.get(request_id):
-                        try:
-                            credit.release()
-                        except ValueError as error:
-                            raise ProtocolError("Excess stream credit") from error
-                elif kind == "request":
-                    if expires_at <= datetime.now(UTC):
-                        raise TimeoutError("Tunnel authorization expired")
+                    )
+                    return
+                try:
                     delivery = Delivery.from_payload(frame)
-                    active_count = sum(not task.done() for task in active.values())
-                    if delivery.id in active or active_count >= capacity:
-                        raise ProtocolError(
-                            "Guild tunnel gateway exceeded negotiated request capacity"
-                        )
                     if delivery.stream_response:
                         credits[delivery.id] = asyncio.BoundedSemaphore(STREAM_WINDOW)
                     task = asyncio.create_task(process(delivery))
-                    active[delivery.id] = task
-                    task.add_done_callback(
-                        lambda done, key=delivery.id: finished(key, done)
+                except BaseException:
+                    reservation.release()
+                    raise
+                active[delivery.id] = task
+                task.add_done_callback(
+                    lambda done, key=delivery.id, held=reservation: finished(
+                        key, held, done
                     )
-                else:
-                    raise ProtocolError("Unexpected Guild tunnel gateway frame type")
+                )
+            else:
+                raise ProtocolError("Unexpected Guild tunnel gateway frame type")
+
+        async def receive() -> None:
+            async for data in socket:
+                frame = _parse_frame(data)
+                try:
+                    await receive_frame(frame, len(data))
+                finally:
+                    del frame, data
 
         receiver = asyncio.create_task(receive())
         stopping = asyncio.create_task(stop.wait())

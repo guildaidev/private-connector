@@ -62,7 +62,7 @@ class ChartTests(unittest.TestCase):
         )
         config = json.loads(docs["ConfigMap"]["data"]["connector.json"])
         self.assertEqual(config["destinations"], {"foo": "https://foo.internal:8443"})
-        self.assertEqual(config["max_in_flight"], 4)
+        self.assertNotIn("max_in_flight", config)
         self.assertEqual(
             docs["PersistentVolumeClaim"]["metadata"]["annotations"][
                 "helm.sh/resource-policy"
@@ -141,10 +141,10 @@ class ChartTests(unittest.TestCase):
             with self.subTest(setting=setting):
                 self.assertNotEqual(render(setting).returncode, 0)
 
-    def test_chart_accepts_requested_capacity_above_gateway_ceiling(self):
+    def test_chart_accepts_legacy_capacity_without_setting_the_runtime_limit(self):
         docs = self.manifests("connector.maxInFlight=128")
         config = json.loads(docs["ConfigMap"]["data"]["connector.json"])
-        self.assertEqual(config["max_in_flight"], 128)
+        self.assertNotIn("max_in_flight", config)
 
     def test_chart_accepts_https_control_plane_api_base_path(self):
         docs = self.manifests(

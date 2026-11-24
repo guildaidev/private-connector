@@ -6,7 +6,7 @@ metadata:
     {{- include "connector.labels" . | nindent 4 }}
 data:
   connector.json: |
-    {{- $config := dict "connector_id" .Values.connector.id "control_plane_url" .Values.connector.controlPlaneUrl "identity_directory" "/var/lib/guild-connector/identity" "destinations" .Values.connector.destinations "max_in_flight" .Values.connector.maxInFlight }}
+    {{- $config := dict "connector_id" .Values.connector.id "control_plane_url" .Values.connector.controlPlaneUrl "identity_directory" "/var/lib/guild-connector/identity" "destinations" .Values.connector.destinations }}
     {{- if .Values.controlPlaneCA.existingConfigMap }}
     {{- $_ := set $config "control_plane_ca" "/etc/guild/ca/ca.pem" }}
     {{- end }}
