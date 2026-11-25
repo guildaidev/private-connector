@@ -19,7 +19,11 @@ guild-customer-connector-health = "guild_connector.health:main"
 include = ["guild_connector*"]
 
 [dependency-groups]
-dev = ["ruff==0.16.8", "pyyaml==6.0.3"]
+dev = [
+    "ruff==0.16.8",
+    "pyyaml==6.0.3",
+    "ruamel-yaml==0.19.1",
+]
 
 [tool.ruff]
 line-length = 88

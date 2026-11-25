@@ -12,6 +12,7 @@ import tomllib
 from pathlib import Path
 
 import yaml
+from ruamel.yaml import YAML
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -88,9 +89,11 @@ def build_assets(
             staged_file.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(path, staged_file)
             if path == chart_root / "values.yaml":
-                chart_values = yaml.safe_load(path.read_text())
+                chart_yaml = YAML()
+                chart_yaml.preserve_quotes = True
+                chart_values = chart_yaml.load(path)
                 chart_values["image"].update(repository=image, digest=digest)
-                staged_file.write_text(yaml.safe_dump(chart_values, sort_keys=False))
+                chart_yaml.dump(chart_values, staged_file)
         subprocess.run(
             ["helm", "package", str(staged_chart), "--destination", str(output)],
             check=True,
