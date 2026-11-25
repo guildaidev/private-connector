@@ -10,13 +10,14 @@ connector forwards each request to a configured service in your network.
 | Private connector | Maintains the outbound tunnel. Maps target names to local HTTP(S) origins and forwards requests. |
 | Your service | Handles the HTTP request and returns a response. |
 
-The connector does not need an inbound port. It does not run agents, integration
-code, OAuth exchanges, or LLM calls. See [Connection flow](CONNECTION_FLOW.md)
+The connector does not need an inbound port. Guild runs agents and integration
+code and supplies request credentials. The connector forwards HTTP without
+interpreting OAuth or LLM payloads. See [Connection flow](CONNECTION_FLOW.md)
 for a request example.
 
 ## Configuration and identity
 
-One Guild account can register one connector and enroll up to four tunnels. Each
+Each connector can enroll up to four tunnels. Each
 installation needs its own persistent identity directory. Never share or copy an
 identity directory between installations. A reconnect uses the same identity.
 

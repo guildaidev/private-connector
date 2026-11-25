@@ -4,18 +4,21 @@ The customer runs only the standalone `guild-private-connector` image. Guild
 hosts the integration and tunnel services. The image does not contain those
 services or test services.
 
-Packaging lives in this repository; no image or chart is published merely by
-merging this code. Guild must perform the release steps below and supply an image
-digest and chart version before a customer can pull them.
+Download the Compose bundle or Helm chart from the
+[GitHub release](https://github.com/guildaidev/private-connector/releases/latest).
+Each release includes a digest-pinned image reference, installation files,
+checksums, and Linux amd64/arm64 support. No source checkout or local build is
+required. Publication is separate from merging code; see [Releasing](RELEASING.md).
 
 ## Before installing
 
 1. Create the account's connector in **Settings → Private connectors**.
 2. Copy its ID and the control-plane URL supplied by the app. Do not guess the URL.
 3. Choose a host or Kubernetes namespace with DNS and network access to the
-   permitted internal HTTP services. Configure destination names and exact
-   HTTP(S) origins that match the URLs used by the integrations. The target map
-   is an allowlist, not host remapping; paths and credentials do not belong in it.
+   permitted internal HTTP services. Configure destination names and HTTP(S)
+   origins. Paths and credentials do not belong in this map. The wizard fields
+   only help prepare the initial JSON. You can skip them and edit the file on
+   your host. Add one destination before startup; add other services when needed.
 4. Permit outbound HTTPS to Guild's control plane and outbound WSS to its tunnel
    endpoint (normally port 443). No inbound listener, load balancer, or Kubernetes
    API access is required by the connector.
@@ -31,14 +34,15 @@ integration through it.
 
 ## Docker Compose on a VM
 
-Use the app's downloaded `compose.yaml` with Docker Compose 2.23.1 or later.
-The file includes the connector configuration and a pinned image digest.
-No repository checkout or manual JSON edit is needed. Copy the file and the
+Use the released `compose.yaml` with Docker Compose 2.23.1 or later.
+The file pins the image digest and mounts your `connector.json` read-only.
+Copy the JSON file from Guild and the Compose file, plus the
 separately downloaded `enrollment-token` into a private working folder on a
 Linux host. From that folder:
 
 ```bash
-chmod 600 enrollment-token
+chmod 600 connector.json enrollment-token
+sudo chown 10001:10001 connector.json
 sudo install -d -o 10001 -g 10001 -m 700 enrollment
 sudo install -o 10001 -g 10001 -m 400 enrollment-token enrollment/token
 docker compose up -d connector
@@ -170,7 +174,7 @@ after changing a CA file.
   because a health check failed; the restart policy handles process exits.
 - Neither probe reads identities or logs request data. A dead event loop becomes
   unhealthy after 30 seconds, plus the orchestrator's probe failure threshold.
-- The defaults allow four concurrent requests with a 512 MiB memory limit. Size
+- The operating limit is managed in Guild, with a 512 MiB default memory limit. Size
   memory for buffered bodies, encoding overhead, and concurrency; load-test your
   payloads before raising concurrency. These are not throughput guarantees.
 - Upgrade by pinning the new digest and running `docker compose up -d` or
@@ -205,36 +209,15 @@ the production non-root/read-only restrictions, checks persisted identity permis
 and runs the HTTP/TLS test suite inside the built image. Its test TLS peers are
 fixtures; that smoke test is not a real Guild enrollment or a production soak test.
 
-The separate **Private connector release** workflow:
-
-1. Runs manually from `main`, with a numeric version matching `pyproject.toml`,
-   `Chart.version`, and `Chart.appVersion`.
-2. Validates tests, packaging, and a native container run before publication.
-3. Authenticates to GHCR and checks both the image tag and OCI chart version
-   before publishing either artifact. An existing artifact or an inconclusive
-   lookup (including authentication and registry failures) stops the release.
-4. Publishes `linux/amd64` and `linux/arm64` images to GHCR with SBOM/provenance,
-   and the versioned chart to GHCR's OCI chart registry.
-5. Reports the exact image digest and chart reference in the run summary. Supply
-   those references to customers; do not instruct them to track `latest`.
-
-Release runs are serialized. The existence check prevents accidental reuse of a
-published version; it is not an atomic registry lock against other publishers.
-Restrict publishing access to this workflow. If only one artifact was published
-before a failure, a rerun stops too: investigate the partial release and use a
-new version rather than overwrite it.
-
-Set `PRIVATE_CONNECTOR_RELEASE_ENABLED=true` only after you configure required
-reviewers on the `private-connector-release` GitHub environment. Configure
-package visibility and access so customers can pull **only these artifacts**, not
-Guild's source or backend image.
-GitHub packages may initially be private; the workflow does not make the source
-repository or packages public. Use new versions for releases and security fixes.
-Publication is not deployment and does not imply production sign-off.
+The **Private connector release** workflow validates versions, tests, and the
+packaged runtime before publishing a multi-architecture image, a pinned Helm
+chart, and a GitHub release with installation downloads and checksums. The
+release job verifies public image and chart access without registry credentials.
+See [Releasing](RELEASING.md) for version changes, publication, and recovery.
 
 ## Concurrency
 
-Each tunnel has a fixed safety ceiling of 64 concurrent requests. Guild controls
+Each tunnel has a fixed safety ceiling of 4,096 concurrent requests. Guild controls
 the operating limit within that ceiling. A lower operating limit lets active
 calls finish before admitting more calls. Routine changes require no restart.
 

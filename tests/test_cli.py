@@ -8,8 +8,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import UTC, datetime, timedelta
+from importlib.metadata import version
 from pathlib import Path
 from secrets import token_urlsafe
 from unittest.mock import patch
@@ -22,6 +23,20 @@ from guild_connector.identity import Identity, identity_lock
 
 
 class ConfigurationCliTests(unittest.TestCase):
+    def test_version_does_not_require_config_or_enrollment(self):
+        output = io.StringIO()
+        with (
+            patch("sys.argv", ["guild-private-connector", "--version"]),
+            redirect_stdout(output),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            main()
+        self.assertEqual(raised.exception.code, 0)
+        self.assertEqual(
+            output.getvalue(),
+            f"guild-private-connector {version('guild-private-connector')}\n",
+        )
+
     def setUp(self):
         self.files = tempfile.TemporaryDirectory()
         self.addCleanup(self.files.cleanup)

@@ -7,6 +7,8 @@ on:
         description: Version matching the connector package and chart (major.minor.patch)
         required: true
         type: string
+  push:
+    tags: ["v*.*.*"]
 
 permissions:
   contents: read
@@ -17,16 +19,20 @@ concurrency:
 
 jobs:
   publish:
-    if: github.ref == 'refs/heads/main' && vars.PRIVATE_CONNECTOR_RELEASE_ENABLED == 'true'
+    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    environment: private-connector-release
     permissions:
       contents: read
       packages: write
-    env:
-      CONNECTOR_VERSION: ${{ inputs.version }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      revision: ${{ steps.version.outputs.revision }}
+      image: ${{ steps.names.outputs.image }}
+      digest: ${{ steps.image.outputs.digest }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
@@ -34,10 +40,24 @@ jobs:
         with:
           version: v3.17.3
       - run: python -m pip install --upgrade 'pip>=26.2.2' && pip install uv==0.13.4
-      - name: Validate version, tests and chart
+      - name: Require released source and matching versions
+        id: version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version || github.ref_name }}
         run: |
-          uv sync --locked
-          uv run --frozen python scripts/check-release.py
+          git merge-base --is-ancestor HEAD origin/main
+          version="${REQUESTED_VERSION#v}"
+          revision="$(git rev-parse HEAD)"
+          CONNECTOR_VERSION="$version" uv run --locked python scripts/check-release.py
+          if git rev-parse --verify "refs/tags/v$version" >/dev/null 2>&1; then
+            test "$(git rev-parse "v$version^{commit}")" = "$revision"
+          fi
+          echo "CONNECTOR_VERSION=$version" >> "$GITHUB_ENV"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "RELEASE_REVISION=$revision" >> "$GITHUB_ENV"
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+      - name: Validate tests and chart
+        run: |
           uv run --frozen ruff check
           uv run --frozen ruff format --check
           uv run --frozen python -m unittest discover -s tests -v
@@ -46,12 +66,12 @@ jobs:
         working-directory: deploy/compose
         env:
           CONNECTOR_IMAGE: private-connector:release-test
-        run: |
-          docker compose config --quiet
+        run: docker compose config --quiet
       - name: Test the packaged runtime before publishing
         run: |
-          docker build -t private-connector:release-test .
+          docker build --build-arg VERSION="$CONNECTOR_VERSION" --build-arg REVISION="$RELEASE_REVISION" -t private-connector:release-test .
           bash scripts/smoke-image.sh private-connector:release-test
+          docker run --rm private-connector:release-test --version
       - name: Set package names
         id: names
         env:
@@ -80,13 +100,13 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.names.outputs.image }}:${{ inputs.version }}
+          tags: ${{ steps.names.outputs.image }}:${{ steps.version.outputs.version }}
           build-args: |
-            VERSION=${{ inputs.version }}
-            REVISION=${{ github.sha }}
+            VERSION=${{ steps.version.outputs.version }}
+            REVISION=${{ steps.version.outputs.revision }}
           provenance: mode=max
           sbom: true
-      - name: Publish OCI Helm chart
+      - name: Build customer downloads and publish the pinned chart
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_ACTOR: ${{ github.actor }}
@@ -94,7 +114,47 @@ jobs:
           IMAGE: ${{ steps.names.outputs.image }}
           DIGEST: ${{ steps.image.outputs.digest }}
         run: |
+          uv run --frozen python scripts/release_assets.py --image "$IMAGE" --digest "$DIGEST" --revision "$RELEASE_REVISION" --output dist
+          helm lint "dist/private-connector-${CONNECTOR_VERSION}.tgz" --values dist/connector-values.yaml --set connector.id=00000000-0000-0000-0000-000000000001 --set connector.controlPlaneUrl=https://core.example.test
           printf '%s' "$GH_TOKEN" | helm registry login ghcr.io --username "$GH_ACTOR" --password-stdin
-          helm package helm/private-connector --destination /tmp/connector-chart
-          helm push "/tmp/connector-chart/private-connector-${CONNECTOR_VERSION}.tgz" "$CHARTS"
+          helm push "dist/private-connector-${CONNECTOR_VERSION}.tgz" "$CHARTS"
           printf 'Image: `%s@%s`\n\nChart: `%s/private-connector` version `%s`\n' "$IMAGE" "$DIGEST" "$CHARTS" "$CONNECTOR_VERSION" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: private-connector-release
+          path: dist/
+          retention-days: 30
+          if-no-files-found: error
+
+  release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      CONNECTOR_VERSION: ${{ needs.publish.outputs.version }}
+      RELEASE_REVISION: ${{ needs.publish.outputs.revision }}
+      IMAGE: ${{ needs.publish.outputs.image }}
+      DIGEST: ${{ needs.publish.outputs.digest }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: private-connector-release
+          path: dist
+      - uses: azure/setup-helm@v4.3.1
+        with:
+          version: v3.17.3
+      - name: Verify public downloads without registry credentials
+        run: |
+          docker pull --platform linux/amd64 "$IMAGE@$DIGEST"
+          docker pull --platform linux/arm64 "$IMAGE@$DIGEST"
+          helm show chart "oci://${IMAGE%/*}/charts/private-connector" --version "$CONNECTOR_VERSION"
+          cd dist
+          sha256sum --check SHA256SUMS
+      - name: Create the GitHub release
+        run: |
+          mapfile -t assets < <(find dist -maxdepth 1 -type f ! -name release-notes.md | sort)
+          gh release create "v$CONNECTOR_VERSION" "${assets[@]}" --target "$RELEASE_REVISION" --title "Private connector $CONNECTOR_VERSION" --notes-file dist/release-notes.md --draft
+          gh release edit "v$CONNECTOR_VERSION" --draft=false --latest

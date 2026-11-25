@@ -8,7 +8,7 @@ COPY guild_connector ./guild_connector
 RUN uv sync --frozen --no-dev --no-editable --no-cache --python /usr/local/bin/python
 
 FROM python:3.13.17-slim-bookworm@sha256:e32be0e55814a08977501ca863271d9bd02443710db8f2afaf8372e2c4508530
-ARG VERSION=0.1.0
+ARG VERSION=0.3.0
 ARG REVISION=unknown
 LABEL org.opencontainers.image.title="Guild private connector" \
       org.opencontainers.image.source="https://github.com/guildaidev/private-connector" \
