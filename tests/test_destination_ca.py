@@ -75,6 +75,7 @@ class DestinationCaTests(unittest.IsolatedAsyncioTestCase):
         ):
             (root / "extensions").write_text(
                 "subjectAltName=DNS:localhost\nextendedKeyUsage=serverAuth\n"
+                "authorityKeyIdentifier=keyid,issuer\n"
             )
             subprocess.run(
                 ["openssl", *command],
