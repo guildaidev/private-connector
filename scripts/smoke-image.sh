@@ -32,7 +32,6 @@ from secrets import token_urlsafe
 from uuid import uuid4
 from guild_connector.identity import Identity, identity_lock
 assert os.getuid() == 10001
-assert importlib.util.find_spec("guild_connector") is not None
 assert importlib.util.find_spec("ruff") is None
 assert "CapEff:\t0000000000000000" in Path("/proc/self/status").read_text()
 try:
